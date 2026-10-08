@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
 from norway_company_agent.batch import profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
-from norway_company_agent.evidence import utc_now  # noqa: E402
+from norway_company_agent.evidence import evidence, utc_now  # noqa: E402
 from norway_company_agent.external_footprint import aggregate_footprint, publishable_observation  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate, assess_social_identity  # noqa: E402
 from norway_company_agent.jobs import fetch_jobs_module  # noqa: E402
@@ -120,7 +120,10 @@ def main() -> None:
                 if website_record is not None:
                     profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
                 else:
-                    profile["evidence"]["website"] = apply_website_identity_gate(profile, {"status": "not_available", "source": "registry"})["website"]
+                    profile["evidence"]["website"] = apply_website_identity_gate(
+                        profile,
+                        evidence("website", "not_found", "registry_linked_company_website", "https://data.brreg.no/enhetsregisteret/api/enheter", note="No website discovered or registry URL missing")
+                    )["website"]
 
             if profile["evidence"]["website"].get("status") == "available":
                 web_val = profile["evidence"]["website"].get("value") or {}
@@ -178,8 +181,10 @@ def main() -> None:
                 if publishable_observation(nobs):
                     profile.setdefault("observations", []).append(nobs)
             news_metrics["requests"] = 1
-        except Exception:
-            pass
+            if news_stats.get("error"):
+                profile.setdefault("connector_errors", []).append({"connector": "news", "error": news_stats["error"]})
+        except Exception as exc:
+            profile.setdefault("connector_errors", []).append({"connector": "news", "error": str(exc)})
 
         fagfolk_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
         try:
@@ -188,8 +193,10 @@ def main() -> None:
                 if publishable_observation(fobs):
                     profile.setdefault("observations", []).append(fobs)
             fagfolk_metrics["requests"] = 1
-        except Exception:
-            pass
+            if fagfolk_stats.get("error"):
+                profile.setdefault("connector_errors", []).append({"connector": "fagfolk", "error": fagfolk_stats["error"]})
+        except Exception as exc:
+            profile.setdefault("connector_errors", []).append({"connector": "fagfolk", "error": str(exc)})
 
         if profile.get("observations"):
             profile["external_footprint"] = aggregate_footprint(profile["observations"])

@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any
 
 from .evidence import evidence, utc_now
@@ -45,14 +46,15 @@ def query_nav_jobs(
     *,
     timeout: float = 8.0,
     max_results: int = 15,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
     """Query NAV Arbeidsplassen public search API for job vacancies.
     
     NAV Arbeidsplassen is Norway's official public employment platform (NLOD open data).
+    Returns (hits, status, metrics) where status is 'ok', 'blocked', 'failed', or 'not_applicable'.
     """
     clean_name = _clean_company_name(company_name)
     if not clean_name:
-        return [], {"requests": 0, "bytes": 0, "latencies_ms": []}
+        return [], "not_applicable", {"requests": 0, "bytes": 0, "latencies_ms": []}
     
     query_str = f'"{clean_name}"' if " " in clean_name else clean_name
     query_params = urllib.parse.urlencode({
@@ -80,18 +82,29 @@ def query_nav_jobs(
                 metrics["latencies_ms"].append(elapsed_ms)
                 payload = json.loads(raw.decode("utf-8", errors="replace"))
                 hits = (payload.get("hits") or {}).get("hits") or []
-                return hits, metrics
+                return hits, "ok", metrics
         except urllib.error.HTTPError as exc:
             if exc.code == 429 and attempt == 0:
                 time.sleep(1.5)
                 continue
             logger.debug("NAV jobs HTTP %s for %s", exc.code, company_name)
-            break
+            if exc.code in (403, 429):
+                return [], "blocked", metrics
+            return [], "failed", metrics
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             logger.debug("NAV jobs error for %s: %s", company_name, exc)
-            break
+            return [], "failed", metrics
 
-    return [], metrics
+    return [], "failed", metrics
+
+
+SUBSIDIARY_MODIFIERS = {
+    "eiendom", "holding", "invest", "forsikring", "pensjon", "kapital", "finans",
+    "drift", "service", "bygg", "anlegg", "transport", "logistikk", "consulting",
+    "partner", "handel", "butikk", "norge", "norway", "nordic", "gruppen",
+    "group", "eiendommer", "bolig", "prosjekt", "kraft", "energi", "revisjon",
+    "advokat", "megler", "forvaltning",
+}
 
 
 def match_and_filter_jobs(
@@ -104,24 +117,67 @@ def match_and_filter_jobs(
         return []
     
     org_number = str(profile.get("organisation_number") or "").strip()
+    core_set = set(core)
     verified_jobs = []
 
     for hit in hits:
-        source = hit.get("_source") or {}
+        source = hit.get("_source") if isinstance(hit.get("_source"), dict) else hit
         uuid = source.get("uuid")
         if not uuid:
             continue
 
+        # 1. Filter out expired job vacancies
+        expires = source.get("expires")
+        if expires:
+            try:
+                exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+                if exp_dt < datetime.now(timezone.utc):
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+        # 2. Check employer organisation number if present in hit metadata
+        employer_dict = source.get("employer") or {}
+        props = source.get("properties") or {}
+        employer_org = (
+            employer_dict.get("orgnr")
+            or props.get("employerorgnr")
+            or props.get("orgnr")
+        )
+        if employer_org and str(employer_org).isdigit():
+            if str(employer_org).strip() != org_number:
+                continue
+
+        # 3. Match candidate names (businessName or employer name)
         business_name = source.get("businessName") or ""
-        employer_name = (source.get("employer") or {}).get("name") or ""
+        employer_name = employer_dict.get("name") or ""
         candidate_names = [business_name, employer_name]
 
         exact_match = False
         for cand in candidate_names:
-            cand_tokens = set(_tokens(cand))
-            if set(core).issubset(cand_tokens):
+            if not cand:
+                continue
+            cand_tokens = _tokens(cand)
+            cand_set = set(cand_tokens)
+            if not cand_set:
+                continue
+
+            # Exact token match
+            if cand_set == core_set:
                 exact_match = True
                 break
+
+            # Reject if candidate has distinctive subsidiary/divisional modifier words
+            extra = cand_set - core_set
+            if extra:
+                if extra & SUBSIDIARY_MODIFIERS:
+                    continue
+                loc_tokens = set(_tokens(profile.get("municipality")))
+                if not extra.issubset(loc_tokens):
+                    continue
+                if core_set.issubset(cand_set):
+                    exact_match = True
+                    break
 
         if not exact_match:
             continue
@@ -131,7 +187,6 @@ def match_and_filter_jobs(
 
         title = source.get("title") or "Uspesifisert stilling"
         published = source.get("published")
-        expires = source.get("expires")
         job_url = f"{NAV_JOB_BASE_URL}/{uuid}"
 
         evidence_span = f"{title} — {business_name or employer_name}"
@@ -178,53 +233,6 @@ def match_and_filter_jobs(
         })
 
     return verified_jobs
-
-
-def extract_career_page_jobs(profile: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract verified hiring signals from the company's verified own website."""
-    website = profile.get("evidence", {}).get("website", {})
-    if website.get("status") != "available":
-        return []
-    value = website.get("value") or {}
-    assessment = value.get("identity_assessment") or {}
-    if not assessment.get("publishable", False):
-        return []
-    
-    pages = value.get("pages") or []
-    career_terms = {"karriere", "career", "careers", "jobb", "stillinger", "jobs", "ledige-stillinger"}
-    observations = []
-    org_number = str(profile.get("organisation_number") or "").strip()
-
-    for page in pages:
-        url = str(page.get("url") or "")
-        title = str(page.get("title") or "")
-        haystack = (url + " " + title).casefold()
-        if any(term in haystack for term in career_terms):
-            content_hash = hashlib.sha256(f"{url}|{title}".encode("utf-8")).hexdigest()
-            observations.append({
-                "id": f"careers-{content_hash[:20]}",
-                "organisation_number": org_number,
-                "platform": "company_site",
-                "signal_type": "job_posting",
-                "source_url": url,
-                "retrieved_at": utc_now(),
-                "content_sha256": content_hash,
-                "exact_entity": True,
-                "identity_proof": [
-                    {"type": "verified_company_website_career_page", "value": url}
-                ],
-                "acquisition_mode": "permitted_public_page",
-                "rights_status": "approved",
-                "source_class": "company_owned",
-                "evidence_span": f"{title} — {profile.get('name')}",
-                "metrics": {
-                    "title": title,
-                    "url": url,
-                    "type": "career_page",
-                },
-            })
-
-    return observations
 
 
 def extract_brreg_workforce_snapshot(profile: dict[str, Any]) -> dict[str, Any] | None:
@@ -281,26 +289,45 @@ def fetch_jobs_module(
         )
         return record, [], {"requests": 0, "bytes": 0, "latencies_ms": []}
 
-    hits, metrics = query_nav_jobs(company_name, timeout=timeout)
-    verified = match_and_filter_jobs(profile, hits)
+    hits, nav_status, metrics = query_nav_jobs(company_name, timeout=timeout)
     
-    # Also discover career pages from verified website
-    career_obs = extract_career_page_jobs(profile)
-    hiring_observations = verified + career_obs
+    clean_name = _clean_company_name(company_name)
+    source_url = f"{NAV_STILLINGER_SEARCH_URL}?q={urllib.parse.quote(clean_name)}"
+    retrieved_at = utc_now()
 
     # Discover official registered workforce count
     workforce_obs = extract_brreg_workforce_snapshot(profile)
-    all_observations = list(hiring_observations)
-    if workforce_obs:
-        all_observations.append(workforce_obs)
+    all_observations = [workforce_obs] if workforce_obs else []
 
-    retrieved_at = utc_now()
-    clean_name = _clean_company_name(company_name)
-    source_url = f"{NAV_STILLINGER_SEARCH_URL}?q={urllib.parse.quote(clean_name)}"
+    if nav_status == "blocked":
+        record = evidence(
+            "jobs",
+            "blocked",
+            "official_nav_arbeidsplassen_api",
+            source_url,
+            retrieved_at=retrieved_at,
+            note="NAV Arbeidsplassen public search rate limit or access blocked (HTTP 429/403)",
+        )
+        return record, all_observations, metrics
+    
+    if nav_status == "failed":
+        record = evidence(
+            "jobs",
+            "source_error",
+            "official_nav_arbeidsplassen_api",
+            source_url,
+            retrieved_at=retrieved_at,
+            note="NAV Arbeidsplassen search request failed or timed out",
+        )
+        return record, all_observations, metrics
 
-    if hiring_observations:
+    # nav_status == "ok"
+    verified_jobs = match_and_filter_jobs(profile, hits)
+    all_observations = verified_jobs + all_observations
+
+    if verified_jobs:
         content_hash = hashlib.sha256(
-            json.dumps([j["id"] for j in hiring_observations], sort_keys=True).encode()
+            json.dumps([j["id"] for j in verified_jobs], sort_keys=True).encode()
         ).hexdigest()
         record = evidence(
             "jobs",
@@ -308,7 +335,7 @@ def fetch_jobs_module(
             "official_nav_arbeidsplassen_api",
             source_url,
             value={
-                "job_count": len(hiring_observations),
+                "job_count": len(verified_jobs),
                 "active_postings": [
                     {
                         "id": j["id"],
@@ -318,7 +345,7 @@ def fetch_jobs_module(
                         "expires": j["metrics"].get("expires"),
                         "location": j["metrics"].get("city"),
                     }
-                    for j in hiring_observations
+                    for j in verified_jobs
                 ],
             },
             retrieved_at=retrieved_at,
@@ -332,7 +359,7 @@ def fetch_jobs_module(
             source_url,
             value={"job_count": 0, "active_postings": []},
             retrieved_at=retrieved_at,
-            note="No active job postings found matching exact entity name on Arbeidsplassen",
+            note="Zero active job vacancies found matching exact entity name on Arbeidsplassen",
         )
 
     return record, all_observations, metrics

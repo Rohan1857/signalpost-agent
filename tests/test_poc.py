@@ -736,11 +736,21 @@ class OperationsTests(unittest.TestCase):
         envelope = terminal_envelope(profile, run_id="day-1", modules=["registry", "website"], started_at="2026-01-01T00:00:00Z", completed_at="2026-01-01T00:01:00Z")
         self.assertEqual(envelope["modules"]["registry"]["state"], "complete")
         self.assertEqual(envelope["modules"]["website"]["state"], "blocked_robots")
+        self.assertEqual(envelope["run"]["terminal_status"], "completed")
+        self.assertIn("claims", envelope)
+        self.assertIn("evidence", envelope)
+        self.assertIn("sections", envelope)
+        self.assertIn("synthesis", envelope["sections"])
         self.assertTrue(validate_envelopes([envelope], 1)["passed"])
         self.assertFalse(validate_envelopes([envelope], 2)["passed"])
 
+        bad_envelope = dict(envelope, state="submission_error")
+        self.assertFalse(validate_envelopes([bad_envelope], 1)["passed"])
+
     def test_unknown_evidence_state_is_submission_error(self):
         self.assertEqual(evidence_terminal_state({"status": "not_fetched"}), "submission_error")
+        self.assertEqual(evidence_terminal_state({"status": "not_available"}), "not_found")
+        self.assertEqual(evidence_terminal_state({"status": "error"}), "source_error")
 
     def test_batch_resume_only_skips_profiles_with_all_terminal_modules(self):
         complete = {"evidence": {"registry": {"status": "available"}, "website": {"status": "not_found"}}}
