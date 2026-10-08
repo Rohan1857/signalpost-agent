@@ -1,0 +1,43 @@
+{
+  "run_id": "smoke-apex-002",
+  "started_at": "2026-10-08T12:47:51.277696Z",
+  "completed_at": "2026-10-08T12:50:17.733256Z",
+  "expected_count": 100,
+  "emitted_envelopes": 100,
+  "resumed_profiles": 0,
+  "profiles_fetched_this_run": 100,
+  "modules": [
+    "registry",
+    "accounting_obligation",
+    "registry_live",
+    "financials",
+    "roles",
+    "group",
+    "locations",
+    "website",
+    "jobs"
+  ],
+  "registry": {
+    "registry_snapshot_sha256": "5daebdf852b4a84db2ae2888f44147fc94d43230ab4cd6999bbe9c20e175af18",
+    "registry_rows_scanned": 1172821,
+    "requested": 100,
+    "selected": 100
+  },
+  "operations": {
+    "requests": 636,
+    "bytes": 2621204,
+    "p50_ms": 843,
+    "p95_ms": 906
+  },
+  "validation": {
+    "passed": true,
+    "checks": {
+      "exact_expected_count": true,
+      "unique_organisation_numbers": true,
+      "all_entity_states_terminal": true,
+      "all_module_states_terminal": true,
+      "zero_silent_drops": true
+    },
+    "invalid_states": []
+  }
+}

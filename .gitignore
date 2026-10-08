@@ -1,0 +1,19 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environment
+.venv/
+env/
+venv/
+
+# Large downloaded datasets
+brreg-enheter.csv
+brreg-enheter.csv.gz
+signalpost-universe.jsonl.gz
+
+# Temp
+test-org.jsonl
+*.tmp
