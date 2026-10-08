@@ -1,3 +1,9 @@
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
 import pytest
 from norway_company_agent.jobs import fetch_jobs_module, match_and_filter_jobs
 from norway_company_agent.external_footprint import publishable_observation, validate_observation

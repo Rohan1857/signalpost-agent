@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -9,14 +10,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 from norway_company_agent.batch import profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.evidence import utc_now  # noqa: E402
-from norway_company_agent.external_footprint import aggregate_footprint  # noqa: E402
-from norway_company_agent.identity import apply_website_identity_gate  # noqa: E402
+from norway_company_agent.external_footprint import aggregate_footprint, publishable_observation  # noqa: E402
+from norway_company_agent.identity import apply_website_identity_gate, assess_social_identity  # noqa: E402
 from norway_company_agent.jobs import fetch_jobs_module  # noqa: E402
 from norway_company_agent.official import fetch_official_modules  # noqa: E402
 from norway_company_agent.website import fetch_website  # noqa: E402
+from scripts.extract_company_site_activity import observation as site_activity_obs  # noqa: E402
+from scripts.extract_company_site_news import observation as site_news_obs  # noqa: E402
+from scripts.run_google_news_rss_connector import fetch as fetch_google_news  # noqa: E402
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -66,7 +71,48 @@ def main() -> None:
             website_url = profile.get("website") or (records.get("registry_live", {}).get("value") or {}).get("website")
             website_record, website_metrics = fetch_website(website_url)
             profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
-        
+
+            if profile["evidence"]["website"].get("status") == "available":
+                web_val = profile["evidence"]["website"].get("value") or {}
+                act_obs = site_activity_obs(profile)
+                if act_obs and publishable_observation(act_obs):
+                    profile.setdefault("observations", []).append(act_obs)
+
+                news_obs = site_news_obs(profile)
+                if news_obs and publishable_observation(news_obs):
+                    profile.setdefault("observations", []).append(news_obs)
+
+                org = str(profile["organisation_number"])
+                retrieved = profile["evidence"]["website"].get("retrieved_at") or utc_now()
+                content_digest = web_val.get("content_sha256")
+                for link in web_val.get("social_links") or []:
+                    social_assessment = assess_social_identity(profile, link)
+                    if social_assessment.get("publishable") and content_digest:
+                        platform = link.get("platform")
+                        social_url = link.get("url")
+                        so_id = "social-" + hashlib.sha256(f"{org}|{social_url}".encode()).hexdigest()[:20]
+                        so_obs = {
+                            "id": so_id,
+                            "organisation_number": org,
+                            "platform": platform,
+                            "signal_type": "profile_metrics",
+                            "source_url": social_url,
+                            "retrieved_at": retrieved,
+                            "content_sha256": content_digest,
+                            "exact_entity": True,
+                            "identity_proof": [
+                                {"type": "company_site_crosslink_and_handle_match", "value": social_url, "score": social_assessment.get("identity_score")},
+                            ],
+                            "acquisition_mode": "permitted_public_page",
+                            "rights_status": "approved",
+                            "source_class": "company_site",
+                            "evidence_span": f"Verified {platform} profile link on official company website.",
+                            "metrics": {"platform": platform, "url": social_url},
+                            "strategy": "social_profile_metrics",
+                        }
+                        if publishable_observation(so_obs):
+                            profile.setdefault("observations", []).append(so_obs)
+
         jobs_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
         if "jobs" in requested_modules:
             job_record, job_obs, job_metrics = fetch_jobs_module(profile)
@@ -75,13 +121,23 @@ def main() -> None:
                 profile.setdefault("observations", []).extend(job_obs)
             jobs_metrics = job_metrics
 
+        news_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
+        try:
+            news_obs_list, news_stats = fetch_google_news(profile, limit=2, years=1)
+            for nobs in news_obs_list:
+                if publishable_observation(nobs):
+                    profile.setdefault("observations", []).append(nobs)
+            news_metrics["requests"] = 1
+        except Exception:
+            pass
+
         if profile.get("observations"):
             profile["external_footprint"] = aggregate_footprint(profile["observations"])
 
         metric = {
-            "requests": len(metrics) + website_metrics["requests"] + jobs_metrics["requests"],
-            "bytes": sum(item.bytes_received for item in metrics) + website_metrics["bytes"] + jobs_metrics["bytes"],
-            "latencies_ms": [item.elapsed_ms for item in metrics] + website_metrics["latencies_ms"] + jobs_metrics["latencies_ms"],
+            "requests": len(metrics) + website_metrics["requests"] + jobs_metrics["requests"] + news_metrics["requests"],
+            "bytes": sum(item.bytes_received for item in metrics) + website_metrics["bytes"] + jobs_metrics["bytes"] + news_metrics["bytes"],
+            "latencies_ms": [item.elapsed_ms for item in metrics] + website_metrics["latencies_ms"] + jobs_metrics["latencies_ms"] + news_metrics["latencies_ms"],
         }
         profile["run_metrics"] = metric
         return profile, metric

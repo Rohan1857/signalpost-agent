@@ -224,10 +224,17 @@ def _fetch_secondary_page(url: str, *, homepage_domain: str, timeout: float, max
         page_html = raw.decode("utf-8", errors="replace")
         page_soup = BeautifulSoup(page_html, "lxml")
         page_text = trafilatura.extract(page_html, url=final_url, include_links=False, include_tables=False, favor_precision=True) or ""
+        identity_nodes = page_soup.select(
+            'footer, address, [itemprop="legalName"], [itemprop="address"], '
+            '[itemprop="telephone"], [itemprop="email"]'
+        )
+        identity_text = " ".join(node.get_text(" ", strip=True) for node in identity_nodes)
+        identity_text = " ".join(identity_text.split())[:3000]
         page = {
             "url": final_url,
             "title": page_soup.title.get_text(" ", strip=True)[:500] if page_soup.title else "",
             "main_text_excerpt": page_text[:5000],
+            "identity_text_excerpt": identity_text,
             "content_sha256": __import__("hashlib").sha256(raw).hexdigest(),
         }
         return page, _social_links(final_url, page_soup), 2, len(raw), elapsed, None
@@ -290,6 +297,12 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
         title = soup.title.get_text(" ", strip=True) if soup.title else ""
         description_tag = soup.select_one('meta[name="description"], meta[property="og:description"]')
         description = str(description_tag.get("content") or "").strip() if description_tag else ""
+        identity_nodes = soup.select(
+            'footer, address, [itemprop="legalName"], [itemprop="address"], '
+            '[itemprop="telephone"], [itemprop="email"]'
+        )
+        identity_text = " ".join(node.get_text(" ", strip=True) for node in identity_nodes)
+        identity_text = " ".join(identity_text.split())[:3000]
         value = {
             "requested_url": normalized,
             "final_url": final_url,
@@ -297,12 +310,13 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
             "title": title[:500],
             "description": description[:2000],
             "main_text_excerpt": text[:5000],
+            "identity_text_excerpt": identity_text,
             "social_links": _social_links(final_url, soup),
             "structured_organisations": _jsonld_organisations(structured),
             "content_sha256": __import__("hashlib").sha256(raw).hexdigest(),
             "extraction_state": _extraction_state(text, soup),
         }
-        pages = [{"url": final_url, "title": title[:500], "main_text_excerpt": text[:5000], "content_sha256": value["content_sha256"]}]
+        pages = [{"url": final_url, "title": title[:500], "main_text_excerpt": text[:5000], "identity_text_excerpt": identity_text, "content_sha256": value["content_sha256"]}]
         social = value["social_links"]
         crawl_errors = []
         requests = 2
