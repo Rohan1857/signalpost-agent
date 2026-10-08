@@ -1,7 +1,7 @@
 {
-  "run_id": "smoke-apex-003",
-  "started_at": "2026-10-08T14:52:27.790630Z",
-  "completed_at": "2026-10-08T14:55:43.538044Z",
+  "run_id": "smoke-apex-004",
+  "started_at": "2026-10-08T15:30:54.017251Z",
+  "completed_at": "2026-10-08T15:34:05.860445Z",
   "expected_count": 100,
   "emitted_envelopes": 100,
   "resumed_profiles": 0,
@@ -25,9 +25,9 @@
   },
   "operations": {
     "requests": 938,
-    "bytes": 12915577,
+    "bytes": 12928723,
     "p50_ms": 843,
-    "p95_ms": 1031
+    "p95_ms": 1562
   },
   "validation": {
     "passed": true,
