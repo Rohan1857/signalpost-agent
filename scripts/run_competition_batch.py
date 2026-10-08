@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -22,6 +24,26 @@ from norway_company_agent.website import fetch_website  # noqa: E402
 from scripts.extract_company_site_activity import observation as site_activity_obs  # noqa: E402
 from scripts.extract_company_site_news import observation as site_news_obs  # noqa: E402
 from scripts.run_google_news_rss_connector import fetch as fetch_google_news  # noqa: E402
+from scripts.run_fagfolkguiden_reviews_connector import fetch as fetch_fagfolk  # noqa: E402
+
+LEGAL_SUFFIXES = {"as", "asa", "ans", "da", "enk", "iks", "sa", "nuf", "holding", "eiendom", "invest", "gruppen", "group"}
+
+
+def generate_domain_candidates(name: str) -> list[str]:
+    cleaned = re.sub(r"\b(ASA|AS|ANS|DA|ENK|IKS|SA|NUF)\b", "", name, flags=re.IGNORECASE).strip()
+    text = cleaned.translate(str.maketrans({"ø": "o", "å": "a", "æ": "ae", "Ø": "O", "Å": "A", "Æ": "AE"}))
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().casefold()
+    words = re.findall(r"[a-z0-9]+", text)
+    if not words:
+        return []
+    candidates = []
+    candidates.append("https://www." + "".join(words) + ".no")
+    if len(words) > 1:
+        candidates.append("https://www." + "-".join(words) + ".no")
+    non_generic = [w for w in words if w not in LEGAL_SUFFIXES]
+    if non_generic and len(non_generic) < len(words):
+        candidates.append("https://www." + "".join(non_generic) + ".no")
+    return candidates
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -69,8 +91,36 @@ def main() -> None:
         website_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
         if "website" in requested_modules:
             website_url = profile.get("website") or (records.get("registry_live", {}).get("value") or {}).get("website")
-            website_record, website_metrics = fetch_website(website_url)
-            profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
+            if not website_url and records.get("locations", {}).get("value"):
+                for loc in records["locations"]["value"]:
+                    if isinstance(loc, dict) and loc.get("website"):
+                        website_url = loc["website"]
+                        break
+
+            website_record = None
+            if website_url:
+                website_record, website_metrics = fetch_website(website_url)
+                gated = apply_website_identity_gate(profile, website_record)["website"]
+                if gated.get("status") == "available":
+                    profile["evidence"]["website"] = gated
+
+            if profile.get("evidence", {}).get("website", {}).get("status") != "available":
+                for cand in generate_domain_candidates(profile.get("name") or ""):
+                    cand_rec, cand_metrics = fetch_website(cand)
+                    website_metrics["requests"] += cand_metrics.get("requests", 0)
+                    website_metrics["bytes"] += cand_metrics.get("bytes", 0)
+                    website_metrics["latencies_ms"].extend(cand_metrics.get("latencies_ms", []))
+                    if cand_rec.get("status") == "available":
+                        cand_gated = apply_website_identity_gate(profile, cand_rec)["website"]
+                        if cand_gated.get("status") == "available":
+                            profile["evidence"]["website"] = cand_gated
+                            break
+
+            if "website" not in profile.get("evidence", {}):
+                if website_record is not None:
+                    profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
+                else:
+                    profile["evidence"]["website"] = apply_website_identity_gate(profile, {"status": "not_available", "source": "registry"})["website"]
 
             if profile["evidence"]["website"].get("status") == "available":
                 web_val = profile["evidence"]["website"].get("value") or {}
@@ -131,13 +181,23 @@ def main() -> None:
         except Exception:
             pass
 
+        fagfolk_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
+        try:
+            fagfolk_obs_list, fagfolk_stats = fetch_fagfolk(profile, cache_dir=Path(".cache/fagfolk"))
+            for fobs in fagfolk_obs_list:
+                if publishable_observation(fobs):
+                    profile.setdefault("observations", []).append(fobs)
+            fagfolk_metrics["requests"] = 1
+        except Exception:
+            pass
+
         if profile.get("observations"):
             profile["external_footprint"] = aggregate_footprint(profile["observations"])
 
         metric = {
-            "requests": len(metrics) + website_metrics["requests"] + jobs_metrics["requests"] + news_metrics["requests"],
-            "bytes": sum(item.bytes_received for item in metrics) + website_metrics["bytes"] + jobs_metrics["bytes"] + news_metrics["bytes"],
-            "latencies_ms": [item.elapsed_ms for item in metrics] + website_metrics["latencies_ms"] + jobs_metrics["latencies_ms"] + news_metrics["latencies_ms"],
+            "requests": len(metrics) + website_metrics["requests"] + jobs_metrics["requests"] + news_metrics["requests"] + fagfolk_metrics["requests"],
+            "bytes": sum(item.bytes_received for item in metrics) + website_metrics["bytes"] + jobs_metrics["bytes"] + news_metrics["bytes"] + fagfolk_metrics["bytes"],
+            "latencies_ms": [item.elapsed_ms for item in metrics] + website_metrics["latencies_ms"] + jobs_metrics["latencies_ms"] + news_metrics["latencies_ms"] + fagfolk_metrics["latencies_ms"],
         }
         profile["run_metrics"] = metric
         return profile, metric
