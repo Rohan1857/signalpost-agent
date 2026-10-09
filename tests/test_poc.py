@@ -577,13 +577,26 @@ class CompletenessScoreTests(unittest.TestCase):
                 "status": "available", "retrieved_at": "2026-08-23T00:00:00Z",
                 "value": {
                     "identity_assessment": {"publishable": True, "score": 1.0},
-                    "pages": [{"url": "https://example.test/aktuelt/new-contract", "title": "New contract", "content_sha256": "a" * 64}],
+                    "pages": [{"url": "https://example.test/aktuelt/new-contract", "title": "New contract", "content_sha256": "a" * 64,
+                               "article": {"title": "New contract", "published_at": "2026-08-22", "date_extraction_method": "article_jsonld_datePublished_v1"}}],
                 },
             }},
         }
         item = site_news_observation(profile)
         self.assertEqual(item["signal_type"], "public_post")
         self.assertTrue(publishable_observation(item))
+        self.assertEqual(item["published_at"], "2026-08-22")
+        from scripts.extract_company_site_news import observations
+        import copy
+        valid = copy.deepcopy(profile["evidence"]["website"]["value"]["pages"][0])
+        page = profile["evidence"]["website"]["value"]["pages"][0]
+        page["article"]["published_at"] = "2099-01-01"
+        self.assertIsNone(site_news_observation(profile))
+        profile["evidence"]["website"]["value"]["pages"].append(valid)
+        self.assertEqual(len(observations(profile)), 1)
+        profile["evidence"]["website"]["value"]["pages"].pop()
+        page["article"] = None
+        self.assertIsNone(site_news_observation(profile))
         profile["evidence"]["website"]["value"]["pages"][0]["url"] = "https://example.test/contact"
         self.assertIsNone(site_news_observation(profile))
 
@@ -617,6 +630,31 @@ class CompletenessScoreTests(unittest.TestCase):
 
 
 class SamplingTests(unittest.TestCase):
+    def test_frozen_universe_selector_excludes_prior_batch_and_rejects_shortfall(self):
+        from select_entry_batch import main as select_batch
+
+        with tempfile.TemporaryDirectory() as directory:
+            universe = Path(directory) / "universe.jsonl.gz"
+            excluded = Path(directory) / "prior.jsonl"
+            output = Path(directory) / "selected.jsonl"
+            rows = [{"organisation_number": str(200000000 + index)} for index in range(6)]
+            with gzip.open(universe, "wt", encoding="utf-8") as handle:
+                handle.write("\n".join(json.dumps(row) for row in rows))
+            excluded.write_text(json.dumps(rows[0]) + "\n" + json.dumps(rows[1]), encoding="utf-8")
+            command = ["select_entry_batch.py", "--universe", str(universe), "--exclude", str(excluded), "--output", str(output), "--seed", "7", "--count", "3"]
+            with patch.object(sys, "argv", command):
+                select_batch()
+                first = output.read_bytes()
+                select_batch()
+            self.assertEqual(first, output.read_bytes())
+            selected = {json.loads(line)["organisation_number"] for line in first.splitlines()}
+            self.assertEqual(len(selected), 3)
+            self.assertTrue(selected <= {row["organisation_number"] for row in rows[2:]})
+            with patch.object(sys, "argv", command[:-1] + ["5"]):
+                with self.assertRaisesRegex(SystemExit, "after exclusions"):
+                    select_batch()
+            self.assertEqual(first, output.read_bytes())
+
     def test_financial_filer_sample_requires_current_active_rows_and_preserves_overlap(self):
         fields = ["organisasjonsnummer", "navn", "organisasjonsform.kode", "sisteInnsendteAarsregnskap", "konkurs", "underAvvikling"]
         rows = [
@@ -729,13 +767,13 @@ class OperationsTests(unittest.TestCase):
         profile = {
             "organisation_number": "923609016",
             "evidence": {
-                "registry": evidence("registry", "available", "official", "https://example.test", content_sha256="a" * 64),
+                "registry": evidence("registry", "available", "official", "https://example.test", value={"organisasjonsnummer": "923609016"}, content_sha256="a" * 64),
                 "website": evidence("website", "blocked", "company_site", "https://example.test", note="robots.txt denied"),
             },
         }
         envelope = terminal_envelope(profile, run_id="day-1", modules=["registry", "website"], started_at="2026-01-01T00:00:00Z", completed_at="2026-01-01T00:01:00Z")
-        self.assertEqual(envelope["modules"]["registry"]["state"], "complete")
-        self.assertEqual(envelope["modules"]["website"]["state"], "blocked_robots")
+        self.assertEqual(envelope["modules"]["registry"]["state"], "available")
+        self.assertEqual(envelope["modules"]["website"]["state"], "blocked")
         self.assertEqual(envelope["run"]["terminal_status"], "completed")
         self.assertIn("claims", envelope)
         self.assertIn("evidence", envelope)
@@ -748,9 +786,25 @@ class OperationsTests(unittest.TestCase):
         self.assertFalse(validate_envelopes([bad_envelope], 1)["passed"])
 
     def test_unknown_evidence_state_is_submission_error(self):
-        self.assertEqual(evidence_terminal_state({"status": "not_fetched"}), "submission_error")
-        self.assertEqual(evidence_terminal_state({"status": "not_available"}), "not_found")
-        self.assertEqual(evidence_terminal_state({"status": "error"}), "source_error")
+        self.assertEqual(evidence_terminal_state({"status": "not_fetched"}), "failed")
+        self.assertEqual(evidence_terminal_state({"status": "not_available"}), "not_available")
+        self.assertEqual(evidence_terminal_state({"status": "error"}), "failed")
+
+    def test_envelope_activity_section_excludes_unapproved_and_foreign_observations(self):
+        import copy
+
+        post = {"id": "post-1", "organisation_number": "923609016", "platform": "company_site", "signal_type": "public_post",
+                "source_class": "company_site", "source_url": "https://example.no/news", "retrieved_at": "2026-10-08T00:00:00Z",
+                "published_at": "2023-10-26", "content_sha256": "a" * 64, "exact_entity": True, "identity_proof": [{"type": "website_identity"}],
+                "evidence_span": "An older publication", "acquisition_mode": "permitted_public_page", "rights_status": "approved",
+                "metrics": {"title": "An older publication"}}
+        profile = {"organisation_number": "923609016", "evidence": {
+            "registry": evidence("registry", "available", "official", "https://example.no/registry", value={"organisasjonsnummer": "923609016"}, content_sha256="b" * 64)},
+            "observations": [post, {**post, "id": "unapproved", "rights_status": "review_required"},
+                             {**post, "id": "foreign", "organisation_number": "999999999"}]}
+        result = terminal_envelope(profile, run_id="test", modules=["registry"], started_at="2026-10-08T00:00:00Z", completed_at="2026-10-08T00:01:00Z")
+        self.assertEqual([item["id"] for item in result["sections"]["hiring_and_dated_public_activity"]["observations"]], ["post-1"])
+        self.assertTrue(validate_envelopes([result], 1)["passed"])
 
     def test_batch_resume_only_skips_profiles_with_all_terminal_modules(self):
         complete = {"evidence": {"registry": {"status": "available"}, "website": {"status": "not_found"}}}
@@ -771,6 +825,52 @@ class OperationsTests(unittest.TestCase):
 
 
 class WebsiteTests(unittest.TestCase):
+    def test_numbered_footer_preserves_legal_operator_for_identity(self):
+        from norway_company_agent.website import _identity_text
+
+        soup = BeautifulSoup('<html><head><title>Example</title></head><body><div id="footer3"><p>© 2026 Example AS · Org nr 999999999</p></div><div id="footer-product"><p>Unrelated product text</p></div></body></html>', "lxml")
+        captured = _identity_text(soup)
+        self.assertIn("Example AS", captured)
+        self.assertIn("999999999", captured)
+        self.assertNotIn("Unrelated product text", captured)
+        profile = {"organisation_number": "999999999", "name": "Example AS", "evidence": {"website": {"status": "available", "source_url": "https://example.no/", "value": {"title": "Example", "final_url": "https://example.no/", "identity_text_excerpt": captured}}}}
+        self.assertTrue(assess_website_identity(profile)["publishable"])
+        profile["organisation_number"] = "888888888"
+        self.assertFalse(assess_website_identity(profile)["publishable"])
+
+    def test_xml_declared_html_retains_identity_and_structured_data(self):
+        import hashlib
+        from norway_company_agent import website
+
+        raw = b'<?xml version="1.0" encoding="UTF-8"?><html><head><title>Demo AS</title><script type="application/ld+json">{"@context":"https://schema.org","@type":"Organization","name":"Demo AS"}</script></head><body><footer>Demo AS Org nr 999999999</footer></body></html>'
+
+        class Response:
+            headers = {"content-type": "text/html; charset=utf-8"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, limit):
+                return raw[:limit]
+
+            def geturl(self):
+                return "https://demo.no/"
+
+        with patch.object(website, "assert_public_url"), patch.object(website, "_robots_allowed", return_value=True), patch.object(website.SAFE_OPENER, "open", return_value=Response()):
+            record, _ = website.fetch_website("https://demo.no/")
+            page, _, _, _, _, error = website._fetch_secondary_page("https://demo.no/", homepage_domain="demo.no", timeout=1, max_bytes=2000000)
+
+        self.assertEqual(record["status"], "available")
+        self.assertEqual(record["value"]["structured_organisations"][0]["name"], "Demo AS")
+        self.assertEqual(record["content_sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertIsNone(error)
+        self.assertEqual(page["title"], "Demo AS")
+        self.assertIn("999999999", page["identity_text_excerpt"])
+        self.assertEqual(page["content_sha256"], hashlib.sha256(raw).hexdigest())
+
     def test_interrupted_run_does_not_synthesize_terminal_failures(self):
         profiles = [{"organisation_number": "1", "website": "pending.no"}]
         self.assertEqual(terminal_events_for_run(profiles, [], False), [])
@@ -843,6 +943,111 @@ class WebsiteTests(unittest.TestCase):
         self.assertEqual(normalize_homepage("example.no"), "https://example.no/")
         self.assertEqual(normalize_homepage("http://example.no"), "http://example.no/")
 
+    def test_international_registry_url_produces_ascii_http_request(self):
+        import http.client
+        import urllib.request
+        import urllib.parse
+        url = normalize_homepage("https://WWW.Føniksadvokater.no:8443/blåbær/%C3%B8")
+        self.assertEqual(url, "https://www.xn--fniksadvokater-qqb.no:8443/bl%C3%A5b%C3%A6r/%C3%B8")
+        self.assertEqual(normalize_homepage(url), url)
+        opener = urllib.request.build_opener()
+        handler = urllib.request.HTTPHandler()
+        handler.add_parent(opener)
+        request = handler.do_request_(urllib.request.Request(url))
+        request.get_header("Host").encode("ascii")
+        connection = http.client.HTTPConnection(request.host)
+        connection.putrequest("GET", request.selector)
+        self.assertIn(b"GET /bl%C3%A5b%C3%A6r/%C3%B8 HTTP/1.1", connection._buffer)
+        self.assertEqual(normalize_homepage("http://[2606:4700:4700::1111]:8080/"), "http://[2606:4700:4700::1111]:8080/")
+        self.assertIsNone(normalize_homepage("https://example.no:invalid/"))
+
+    def test_single_bundle_empty_shell_is_a_browser_candidate(self):
+        empty_shell = BeautifulSoup('<html><head><title>Company</title></head><body><div id="root"></div><script src="/assets/index.js"></script></body></html>', "html.parser")
+        self.assertEqual(_extraction_state("", empty_shell), "js_fallback_candidate")
+        static_page = BeautifulSoup('<html><body>' + 'Visible company information. ' * 10 + '<script src="/analytics.js"></script></body></html>', "html.parser")
+        self.assertEqual(_extraction_state("", static_page), "static_complete")
+        self.assertEqual(_extraction_state("", BeautifulSoup('<html><body>Coming soon</body></html>', "html.parser")), "static_complete")
+
+    def test_rendered_snapshot_keeps_dom_and_http_document_provenance_distinct(self):
+        import copy
+        import hashlib
+        from norway_company_agent.website import _rendered_website_record
+
+        document = b'<html><body><div id="root"></div></body></html>'
+        markup = b'<html><head><title>Example</title></head><body><footer>Example AS | Org nr 923609016</footer></body></html>'
+        record = _rendered_website_record("https://example.no/en", markup, document, "https://example.no/")
+        profile = {"organisation_number": "923609016", "name": "Example AS", "evidence": {}}
+        record = apply_website_identity_gate(profile, record)["website"]
+        self.assertEqual(record["status"], "available")
+        self.assertEqual(record["source_url"], "https://example.no/en")
+        self.assertEqual(record["content_sha256"], hashlib.sha256(markup).hexdigest())
+        self.assertEqual(record["value"]["http_document"]["content_sha256"], hashlib.sha256(document).hexdigest())
+        self.assertNotEqual(record["content_sha256"], record["value"]["http_document"]["content_sha256"])
+        profile["evidence"]["website"] = record
+        envelope = terminal_envelope(profile, run_id="rendered", modules=["website"], started_at=record["retrieved_at"], completed_at=record["retrieved_at"])
+        self.assertTrue(validate_envelopes([envelope], 1)["passed"])
+        self.assertTrue(all(item["capture_kind"] == "rendered_dom" for item in envelope["evidence"]))
+        forged = copy.deepcopy(envelope)
+        forged["profile"]["evidence"]["website"]["value"]["captured_html"] += "tampered"
+        self.assertFalse(validate_envelopes([forged], 1)["passed"])
+        changed = markup.replace(b"923609016", b"999999999")
+        wrong = _rendered_website_record("https://example.no/en", changed, document, "https://example.no/")
+        self.assertEqual(apply_website_identity_gate(profile, wrong)["website"]["status"], "ambiguous")
+
+    def test_rendered_legal_pages_prove_seller_within_remaining_budget(self):
+        import time
+        from norway_company_agent.website import _fetch_rendered_identity_pages, _rendered_website_record
+
+        markup = b'<html><head><title>Example</title></head><body><a href="/policies/terms-of-sale">Terms</a><a href="/contact">Contact</a></body></html>'
+        profile = {"organisation_number": "923609016", "name": "Example AS", "evidence": {}}
+        record = _rendered_website_record("https://example.no/", markup, b'<html></html>', "https://example.no/")
+        page = {"url": "https://example.no/policies/terms-of-sale", "title": "Terms", "content_sha256": "b" * 64,
+                "main_text_excerpt": "Selger er Example AS, org.nr. 923 609 016, og betegnes som selger.", "retrieved_at": record["retrieved_at"]}
+        metrics = {"requests": 38, "bytes": 100, "latencies_ms": []}
+        with patch("norway_company_agent.website._fetch_secondary_page", return_value=(page, [], 2, 150, 1, None)) as fetch:
+            _fetch_rendered_identity_pages(record, metrics, deadline=time.monotonic() + 5, max_requests=40)
+        fetch.assert_called_once()
+        self.assertEqual(metrics["requests"], 40)
+        self.assertEqual(metrics["bytes"], 250)
+        self.assertEqual(record["value"]["pages"][1]["capture_kind"], "http_response_body")
+        gated = apply_website_identity_gate(profile, record)["website"]
+        self.assertEqual(gated["status"], "available")
+        self.assertEqual(gated["value"]["identity_assessment"]["identity_evidence"][0]["content_sha256"], "b" * 64)
+        profile["evidence"]["website"] = gated
+        envelope = terminal_envelope(profile, run_id="rendered-seller", modules=["website"], started_at=record["retrieved_at"], completed_at=record["retrieved_at"])
+        self.assertTrue(validate_envelopes([envelope], 1)["passed"])
+        with patch("norway_company_agent.website._fetch_secondary_page") as fetch:
+            _fetch_rendered_identity_pages(record, metrics, deadline=time.monotonic() + 5, max_requests=40)
+            _fetch_rendered_identity_pages(record, {"requests": 0, "bytes": 0}, deadline=time.monotonic() - 1, max_requests=40)
+            fetch.assert_not_called()
+
+    def test_rendered_legal_page_failures_remain_explicit_and_unverified(self):
+        import time
+        from norway_company_agent.website import _fetch_rendered_identity_pages, _rendered_website_record
+        record = _rendered_website_record("https://example.no/", b'<html><body><a href="/terms">Terms</a></body></html>', b'<html></html>', "https://example.no/")
+        with patch("norway_company_agent.website._fetch_secondary_page", return_value=(None, [], 2, 0, 1, "HTTPError: HTTP Error 403")):
+            _fetch_rendered_identity_pages(record, {"requests": 0, "bytes": 0}, deadline=time.monotonic() + 5, max_requests=40)
+        self.assertEqual(len(record["value"]["pages"]), 1)
+        self.assertEqual(record["value"]["crawl_errors"][0]["error"], "HTTPError: HTTP Error 403")
+        self.assertEqual(apply_website_identity_gate({"organisation_number": "923609016", "name": "Example AS"}, record)["website"]["status"], "ambiguous")
+
+    def test_browser_skips_ineligible_and_conflicting_candidates_and_preserves_failures(self):
+        from norway_company_agent.website import fetch_rendered_website
+
+        record = {"status": "ambiguous", "source_url": "https://example.no/", "value": {"extraction_state": "static_complete"}}
+        with patch("norway_company_agent.website.assert_public_url") as guard:
+            self.assertEqual(fetch_rendered_website(record)[1]["requests"], 0)
+            guard.assert_not_called()
+            record["value"].update({"extraction_state": "js_fallback_candidate", "identity_assessment": {"reasons": ["homepage identifies a different legal organisation number"]}})
+            self.assertEqual(fetch_rendered_website(record)[1]["requests"], 0)
+            guard.assert_not_called()
+        record["value"]["identity_assessment"] = {"reasons": []}
+        with patch("norway_company_agent.website.assert_public_url", side_effect=ValueError("Private address")):
+            failed, metrics = fetch_rendered_website(record)
+        self.assertEqual(failed["status"], "ambiguous")
+        self.assertEqual(failed["value"]["browser_error"]["status"], "source_error")
+        self.assertEqual(metrics["requests"], 0)
+
     def test_only_extracts_declared_social_links(self):
         soup = BeautifulSoup('<a href="https://www.linkedin.com/company/example/">LinkedIn</a><a href="/about">About</a>', "html.parser")
         self.assertEqual(_social_links("https://example.no", soup), [{"platform": "linkedin", "url": "https://linkedin.com/company/example"}])
@@ -897,6 +1102,13 @@ class WebsiteTests(unittest.TestCase):
     def test_priority_pages_stay_on_exact_site(self):
         soup = BeautifulSoup('<a href="/kontakt">Contact</a><a href="https://other.no/about">About</a><a href="/products">Products</a>', "html.parser")
         self.assertEqual(_priority_links("https://example.no/", soup), ["https://example.no/kontakt"])
+
+    def test_legal_pages_take_priority_and_contact_substrings_do_not_match(self):
+        soup = BeautifulSoup('<a href="/kontaktlinser">Kontaktlinser</a><a href="/about/team">Team</a><a href="/policies/terms-of-service">Terms</a><a href="/kontakt-oss">Kontakt oss</a><a href="/kjopsvilkar">Kjøpsvilkår</a>', "html.parser")
+        links = _priority_links("https://example.no/", soup, limit=2)
+        self.assertEqual(links[0], "https://example.no/policies/terms-of-service")
+        self.assertNotIn("https://example.no/kontaktlinser", links)
+        self.assertEqual(links[1], "https://example.no/kjopsvilkar")
 
     def test_js_shell_is_only_a_fallback_candidate(self):
         shell = BeautifulSoup('<html><script src="a.js"></script><script src="b.js"></script></html>', "html.parser")
@@ -1050,6 +1262,27 @@ class SentimentTests(unittest.TestCase):
 
 
 class OfficialNormalizationTests(unittest.TestCase):
+    def test_latest_financials_are_selected_before_limiting_and_keep_company_scope(self):
+        from norway_company_agent.official import latest_financial_record
+
+        body = [{"id": year * 10 + scope, "regnskapstype": kind,
+                 "regnskapsperiode": {"fraDato": f"{year}-01-01", "tilDato": f"{year}-12-31"},
+                 "resultatregnskapResultat": {"driftsresultat": {"driftsinntekter": {"sumDriftsinntekter": year * 10 + scope}}}}
+                for year in (2023, 2024, 2025) for scope, kind in ((1, "KONSERN"), (2, "SELSKAP"))]
+        records = normalize_financials(body)["records"]
+        self.assertEqual(len(records), 6)
+        self.assertEqual(records[0]["period"]["tilDato"], "2025-12-31")
+        self.assertEqual(records[0]["account_type"], "SELSKAP")
+        self.assertEqual(latest_financial_record(list(reversed(records)))["revenue"], 20252)
+        company_old = records[-1]
+        company_old = {**company_old, "account_type": "SELSKAP"}
+        newer_group = {**records[0], "account_type": "KONSERN"}
+        self.assertEqual(latest_financial_record([newer_group, company_old]), company_old)
+        row = {"organisation_number": "923609016", "evidence": {"financials": evidence("financials", "available", "official", "https://example.no/accounts", value={"records": records})}}
+        facts = answer_profile(row, "Show financials")["facts"]
+        self.assertEqual(next(f["value"] for f in facts if f["claim"] == "Revenue"), 20252)
+        self.assertEqual(next(f["value"] for f in facts if f["claim"] == "Account scope"), "SELSKAP")
+
     def test_accounting_obligation_is_categorical_for_as_but_not_enk(self):
         company = accounting_obligation_assessment({"organisation_number": "923609016", "legal_form": "AS"})
         sole_trader = accounting_obligation_assessment({"organisation_number": "923609017", "legal_form": "ENK", "employees": 0})
@@ -1088,6 +1321,19 @@ class OfficialNormalizationTests(unittest.TestCase):
 
 
 class ResearchAgentTests(unittest.TestCase):
+    def test_summary_distinguishes_baseline_and_source_linked_unknowns(self):
+        row = {"organisation_number": "923609016", "name": "Example AS", "evidence": {
+            "jobs": {"status": "blocked", "source_url": "https://pam-stilling-feed.nav.no/api/v1/feed", "retrieved_at": "2026-10-08T00:00:00Z"}}}
+        answer = answer_profile(row, "Summarize this company")
+        self.assertEqual(answer["refresh_summary"]["state"], "baseline")
+        hiring = next(item for item in answer["uncertainties"] if item["module"] == "jobs")
+        self.assertEqual(hiring["status"], "blocked")
+        self.assertEqual(hiring["source_url"], row["evidence"]["jobs"]["source_url"])
+        self.assertIn("does not mean zero", hiring["value"])
+        self.assertIsNone(hiring["content_sha256"])
+        row["refresh_baseline"] = None  # A prior input can lack a completion date.
+        self.assertEqual(answer_profile(row, "Summarize this company")["refresh_summary"]["state"], "no_verified_changes")
+
     @staticmethod
     def screen_row(org, municipality, employees, revenue):
         return {
@@ -1167,6 +1413,41 @@ class ResearchAgentTests(unittest.TestCase):
 
 
 class PrototypeTests(unittest.TestCase):
+    def test_nav_vacancy_dates_survive_metric_normalization(self):
+        row = {"organisation_number": "923609016", "name": "Example AS", "legal_form": "AS", "employees": None,
+               "municipality": "OSLO", "industry_code": None, "industry_label": None, "bankrupt": False, "liquidating": False,
+               "evidence": {"jobs": {"status": "available", "value": {"job_count": 1}}}}
+        job = {"id": "nav-job", "organisation_number": "923609016", "platform": "job_board", "signal_type": "job_posting",
+               "source_class": "job_board", "source_url": "https://pam-stilling-feed.nav.no/api/v1/feedentry/job",
+               "retrieved_at": "2026-10-08T00:00:00Z", "content_sha256": "a" * 64, "exact_entity": True,
+               "identity_proof": [{"type": "employer_organisation_number", "value": "923609016"}],
+               "evidence_span": "Engineer", "acquisition_mode": "official_api", "rights_status": "approved",
+               "metrics": {"title": "Engineer", "published": "2026-10-01T00:00:00Z", "expires": "2099-12-31T00:00:00Z"}}
+        row["observations"] = [job]
+        captured = compact_prototype(row)["external"]["jobs"][0]
+        self.assertEqual(captured["publishedAt"], job["metrics"]["published"])
+        self.assertEqual(captured["expiresAt"], job["metrics"]["expires"])
+        job["published_at"] = "2026-10-02T00:00:00Z"
+        self.assertEqual(compact_prototype(row)["external"]["jobs"][0]["publishedAt"], job["published_at"])
+
+    def test_prototype_retains_dated_activity_and_blocked_jobs_without_foreign_claims(self):
+        row = {"organisation_number": "923609016", "name": "Example AS", "legal_form": "AS", "employees": None,
+               "municipality": "OSLO", "industry_code": None, "industry_label": None, "bankrupt": False, "liquidating": False,
+               "evidence": {"jobs": {"status": "blocked", "value": None}}}
+        post = {"id": "post-1", "organisation_number": "923609016", "platform": "company_site", "signal_type": "public_post",
+                "source_class": "company_site", "source_url": "https://example.no/news", "retrieved_at": "2026-10-08T00:00:00Z",
+                "published_at": "2023-10-26T15:01:03", "content_sha256": "a" * 64, "exact_entity": True,
+                "identity_proof": [{"type": "website_identity"}], "evidence_span": "An older publication",
+                "acquisition_mode": "permitted_public_page", "rights_status": "approved", "metrics": {"title": "An older publication"}}
+        row["observations"] = [post, {**post, "id": "foreign", "organisation_number": "999999999"},
+                               {**post, "id": "unapproved", "rights_status": "review_required"}]
+        result = compact_prototype(row)
+        self.assertEqual(len(result["external"]["posts"]), 1)
+        self.assertEqual(result["external"]["posts"][0]["publishedAt"], "2023-10-26T15:01:03")
+        self.assertEqual(result["external"]["posts"][0]["hash"], "a" * 64)
+        self.assertEqual(result["jobs"]["status"], "blocked")
+        self.assertEqual(result["external"]["jobs"], [])
+
     def test_qualification_copy_keeps_production_boundary_visible(self):
         header, boundary = qualification_copy({
             "weighted_score": {"verified_points": 100, "maximum_points": 100},
@@ -1210,6 +1491,26 @@ class PrototypeTests(unittest.TestCase):
 
 
 class RefreshTests(unittest.TestCase):
+    def test_publication_refresh_distinguishes_discovery_from_publication_and_no_false_deletion(self):
+        import copy
+        previous = {"organisation_number": "923609016", "evidence": {"website": {"status": "available", "retrieved_at": "2026-10-01T00:00:00Z"}}, "observations": []}
+        item = {"id": "post-1", "organisation_number": "923609016", "platform": "company_site", "signal_type": "public_post", "source_class": "company_site",
+                "source_url": "https://example.no/news/post", "retrieved_at": "2026-10-08T00:00:00Z", "published_at": "2025-01-01",
+                "content_sha256": "a" * 64, "exact_entity": True, "identity_proof": [{"type": "website_identity"}], "evidence_span": "A publication",
+                "acquisition_mode": "permitted_public_page", "rights_status": "approved", "metrics": {"title": "A publication", "published_at": "2025-01-01"}}
+        current = copy.deepcopy(previous); current["observations"] = [item]
+        self.assertEqual(diff_profile(previous, current)[0]["change_type"], "publication_discovered")
+        self.assertEqual(diff_profile(current, copy.deepcopy(current)), [])
+        self.assertEqual(diff_profile(current, previous), [])
+        item["published_at"] = "2026-10-07"
+        item["metrics"]["published_at"] = "2026-10-07"
+        self.assertEqual(diff_profile(previous, current)[0]["change_type"], "new_publication")
+        answer = answer_profile(current, "Show dated news")
+        self.assertEqual(answer["facts"][0]["classification"], "company_reported_publication")
+        self.assertEqual(answer["facts"][0]["content_sha256"], "a" * 64)
+        current["evidence"]["website"]["status"] = "blocked"
+        self.assertEqual(diff_profile(previous, current), [])
+
     def test_snapshot_fetcher_hashes_evaluator_bytes_and_carries_times(self):
         url = "https://example.test/entity/1"
         fetcher = SnapshotFetcher({"retrieved_at": "2026-01-02T00:00:00Z", "effective_at": "2026-01-01T00:00:00Z", "responses": {url: {"body": {"value": 1}}}})
@@ -1237,6 +1538,250 @@ class RefreshTests(unittest.TestCase):
 
 
 class WebsiteIdentityTests(unittest.TestCase):
+    def test_registered_contact_proof_requires_homepage_name_and_all_exact_contacts(self):
+        import copy
+        profile = {"organisation_number": "913006860", "name": "C OPTIKK EIDSVOLL AS", "evidence": {
+            "registry_live": evidence("registry_live", "available", "official", "https://data.brreg.no/entity/913006860", content_sha256="a" * 64, value={
+                "organisation_number": "913006860", "name": "C OPTIKK EIDSVOLL AS", "telephone": "64 80 98 00",
+                "business_address": {"adresse": ["Gladbakkvegen 1"], "postnummer": "2070"},
+            }),
+            "website": {"status": "available", "value": {"final_url": "https://example.no/", "content_sha256": "b" * 64,
+                "title": "Startside | c)optikk Eidsvoll", "identity_text_excerpt": "Kontakt oss 64 80 98 00 Gladbakkvegen 1, 2070 Råholt"}},
+        }}
+        result = assess_website_identity(profile)
+        self.assertTrue(result["publishable"])
+        self.assertEqual(result["identity_evidence"][0]["registry_content_sha256"], "a" * 64)
+        variants = [
+            ("title", "Parent Optikk"),
+            ("title", "C Optikk Eidsvoll Holding AS"),
+            ("title", "C Optikk Eidsvoll Eiendom"),
+            ("identity_text_excerpt", "64 80 98 00 Gladbakkvegen 1, 9999 Råholt"),
+            ("identity_text_excerpt", "64 80 98 00 Gladbakkvegen 2, 2070 Råholt"),
+            ("identity_text_excerpt", "99 99 99 99 Gladbakkvegen 1, 2070 Råholt"),
+            ("identity_text_excerpt", "64 80 98 00 Gladbakkvegen 1, 2070 Råholt Org nr 999888777"),
+        ]
+        for key, replacement in variants:
+            changed = copy.deepcopy(profile)
+            changed["evidence"]["website"]["value"][key] = replacement
+            changed["evidence"]["website"]["value"]["pages"] = [{"main_text_excerpt": "C Optikk Eidsvoll AS"}]
+            with self.subTest(key=key, replacement=replacement):
+                self.assertFalse(assess_website_identity(changed)["publishable"])
+        profile["evidence"]["registry_live"]["value"]["organisation_number"] = "999888777"
+        self.assertFalse(assess_website_identity(profile)["publishable"])
+
+    def test_article_capture_rejects_other_article_and_modified_only_dates(self):
+        from norway_company_agent.website import _article_capture, _activity_links, fetch_site_activity_pages
+
+        soup = BeautifulSoup('<h1>Company announcement</h1><a href="/news/item">Read</a><a href="https://other.no/news/item">Other</a>', "html.parser")
+        metadata = {"json-ld": [{"@type": "NewsArticle", "headline": "Company announcement", "datePublished": "2026-08-22", "url": "https://example.no/news/item"}]}
+        self.assertEqual(_article_capture("https://example.no/news/item", soup, metadata)["published_at"], "2026-08-22")
+        self.assertIsNone(_article_capture("https://example.no/news/other", soup, metadata))
+        metadata["json-ld"][0].pop("datePublished")
+        metadata["json-ld"][0]["dateModified"] = "2026-08-22"
+        self.assertIsNone(_article_capture("https://example.no/news/item", soup, metadata))
+        self.assertEqual(_activity_links("https://example.no/", soup), ["https://example.no/news/item"])
+        cards = BeautifulSoup('<h2 class="wp-block-post-title"><a href="/an-article">Title</a></h2><a href="/post/norsk-å">Blog post</a>', "html.parser")
+        self.assertEqual(_activity_links("https://example.no/blog", cards), ["https://example.no/an-article", "https://example.no/post/norsk-%C3%A5"])
+        with patch("norway_company_agent.website._fetch_secondary_page") as fetch:
+            self.assertEqual(fetch_site_activity_pages({"status": "ambiguous", "value": {}})["requests"], 0)
+            fetch.assert_not_called()
+
+    def test_activity_crawl_is_bounded_and_retains_page_errors(self):
+        from norway_company_agent.website import fetch_site_activity_pages
+
+        website = {"status": "available", "value": {"final_url": "https://example.no/", "identity_assessment": {"publishable": True},
+                   "pages": [{"url": "https://example.no/", "activity_links": ["https://example.no/news/a", "https://example.no/news/b", "https://example.no/news/c"]}]}}
+        with patch("norway_company_agent.website._fetch_secondary_page", return_value=(None, [], 2, 0, 8, "HTTP 403")) as fetch:
+            metrics = fetch_site_activity_pages(website, max_pages=2)
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(metrics["requests"], 4)
+        self.assertEqual(len(website["value"]["crawl_errors"]), 2)
+        other_host_page = {"url": "https://other.example.no/news/a"}
+        with patch("norway_company_agent.website._fetch_secondary_page", return_value=(other_host_page, [], 2, 10, 8, None)):
+            fetch_site_activity_pages(website, max_pages=1)
+        self.assertEqual(len(website["value"]["pages"]), 1)
+        self.assertIn("outside verified homepage host", website["value"]["crawl_errors"][-1]["error"])
+
+    def test_advertised_rss_fallback_retains_original_dates_and_response_hash(self):
+        import hashlib
+        from norway_company_agent.website import _publication_feed_links, fetch_site_activity_pages
+        from scripts.extract_company_site_news import observations
+
+        soup = BeautifulSoup('<link rel="alternate" type="application/rss+xml" title="Comments" href="/comments/feed/"><link rel="alternate" type="application/rss+xml" href="https://other.no/feed/"><link rel="alternate" type="application/rss+xml" href="/?feed=rss2">', "html.parser")
+        links = _publication_feed_links("https://example.no/", soup)
+        self.assertEqual(links, ["https://example.no/?feed=rss2"])
+        raw = b'<rss><channel><item><title>New service</title><link>https://example.no/new-service</link><pubDate>Sat, 22 Aug 2026 12:00:00 +0000</pubDate></item></channel></rss>'
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_args): return None
+            def read(self, *_args): return raw
+            def geturl(self): return links[0]
+        website = {"status": "available", "value": {"final_url": "https://example.no/", "identity_assessment": {"publishable": True, "score": 1.0}, "pages": [{"url": "https://example.no/", "activity_links": [], "publication_feed_links": links}]}}
+        with patch("norway_company_agent.website.assert_public_url"), patch("norway_company_agent.website._robots_allowed", return_value=True), patch("norway_company_agent.website.SAFE_OPENER.open", return_value=Response()) as fetch:
+            metrics = fetch_site_activity_pages(website, max_pages=1)
+        self.assertEqual(metrics["requests"], 2)
+        self.assertEqual(fetch.call_count, 1)
+        profile = {"organisation_number": "923609016", "evidence": {"website": website}}
+        items = observations(profile)
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(item["source_url"], links[0])
+        self.assertEqual(item["content_sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(item["date_evidence_span"], "Sat, 22 Aug 2026 12:00:00 +0000")
+        self.assertEqual(item["published_at"], "2026-08-22T12:00:00+00:00")
+        self.assertEqual(item["metrics"]["publication_url"], "https://example.no/new-service")
+        self.assertTrue(publishable_observation(item))
+        website["value"]["publication_feeds"][0]["items"][0]["published_at"] = "2099-01-01T00:00:00Z"
+        self.assertEqual(observations(profile), [])
+
+    def test_rss_parser_rejects_unsupported_publication_evidence(self):
+        from norway_company_agent.website import _parse_publication_feed
+
+        raw = b'<rss><channel><item><title>Other publisher</title><link>https://other.no/news</link><pubDate>Sat, 22 Aug 2026 12:00:00 +0000</pubDate></item><item><title>No date</title><link>https://example.no/news</link></item><item><title>Comment</title><link>https://example.no/news#comment-1</link><pubDate>Sat, 22 Aug 2026 12:00:00 +0000</pubDate></item><item><title>No link</title><pubDate>Sat, 22 Aug 2026 12:00:00 +0000</pubDate></item></channel></rss>'
+        self.assertEqual(_parse_publication_feed(raw, "https://example.no/feed/"), [])
+        with self.assertRaises(ValueError):
+            _parse_publication_feed(b'<!DOCTYPE rss [<!ENTITY x "value">]><rss/>', "https://example.no/feed/")
+        with self.assertRaises(ValueError):
+            _parse_publication_feed(b'<html/>', "https://example.no/feed/")
+
+    def test_rss_fallback_respects_activity_budget_and_verified_host(self):
+        from norway_company_agent.website import fetch_site_activity_pages
+
+        website = {"status": "available", "value": {"final_url": "https://example.no/", "identity_assessment": {"publishable": True}, "pages": [{"url": "https://example.no/", "activity_links": ["https://example.no/news/a", "https://example.no/news/b"], "publication_feed_links": ["https://example.no/feed/"]}]}}
+        with patch("norway_company_agent.website._fetch_secondary_page", return_value=(None, [], 2, 0, 8, "HTTP 403")), patch("norway_company_agent.website.SAFE_OPENER.open") as fetch:
+            self.assertEqual(fetch_site_activity_pages(website, max_pages=2)["requests"], 4)
+            fetch.assert_not_called()
+        website["value"]["pages"][0]["activity_links"] = []
+        website["value"]["pages"][0]["publication_feed_links"] = ["https://other.no/feed/"]
+        with patch("norway_company_agent.website.SAFE_OPENER.open") as fetch:
+            self.assertEqual(fetch_site_activity_pages(website)["requests"], 0)
+            fetch.assert_not_called()
+        self.assertNotIn("publication_feeds", website["value"])
+
+    def test_social_suffixes_accept_official_handles_without_accepting_parent_variants(self):
+        profile = {"name": "NOVOOI AS"}
+        for handle in ("novooi", "novooi.official", "novooi.com"):
+            self.assertTrue(assess_social_identity(profile, {"url": "https://instagram.com/" + handle})["publishable"])
+        for handle in ("novooi.holding", "novooi.group", "novooi-norway", "othernovooi"):
+            self.assertFalse(assess_social_identity(profile, {"url": "https://instagram.com/" + handle})["publishable"])
+
+    def test_social_observation_uses_captured_page_and_abstains_without_capture(self):
+        from scripts.run_competition_batch import site_social_observations
+        from norway_company_agent.website import _page_social_captures
+
+        soup = BeautifulSoup('<a href="https://www.linkedin.com/company/novooi/">LinkedIn</a>', "html.parser")
+        captures = _page_social_captures("https://novooi.com/contact", soup, [{"sameAs": ["https://www.instagram.com/novooi.com"]}])
+        profile = {"organisation_number": "923609016", "name": "NOVOOI AS", "evidence": {"website": {
+            "status": "available", "retrieved_at": "2026-10-09T00:00:00Z", "content_sha256": "a" * 64,
+            "value": {"identity_assessment": {"publishable": True}, "social_links": [{"platform": x["platform"], "url": x["url"]} for x in captures],
+                      "pages": [{"url": "https://novooi.com/contact", "content_sha256": "b" * 64, "social_link_evidence": captures}]},
+        }}}
+        observations = site_social_observations(profile)
+        self.assertEqual(len(observations), 2)
+        self.assertTrue(all(x["source_url"] == "https://novooi.com/contact" and x["content_sha256"] == "b" * 64 for x in observations))
+        self.assertEqual({x["evidence_span"] for x in observations}, {"https://www.linkedin.com/company/novooi/", "https://www.instagram.com/novooi.com"})
+        profile["evidence"]["website"]["value"]["pages"][0]["social_link_evidence"] = []
+        self.assertEqual(site_social_observations(profile), [])
+
+    def test_legal_seller_proof_accepts_exact_operator_and_rejects_unsafe_variants(self):
+        import copy
+
+        profile = {"organisation_number": "830961682", "name": "LESKE AS", "evidence": {"website": {"status": "available", "value": {
+            "final_url": "https://leske.no/", "title": "Leske.no", "pages": [{
+                "url": "https://leske.no/policies/terms-of-service", "title": "Salgsbetingelser",
+                "content_sha256": "a" * 64,
+                "main_text_excerpt": "2. Partene\nSelger er LESKE AS, hei@leske.no, Oslo org nr830961682, og betegnes som selger.",
+            }],
+        }}}}
+        assessment = assess_website_identity(profile)
+        self.assertTrue(assessment["publishable"])
+        self.assertEqual(assessment["identity_evidence"][0]["content_sha256"], "a" * 64)
+        variants = [
+            ("main_text_excerpt", "Vårt datterselskap LESKE AS, org nr830961682"),
+            ("main_text_excerpt", "Selger er LESKE HOLDING AS, org nr830961682"),
+            ("main_text_excerpt", "Selger er LESKE AS, org nr999888777"),
+            ("main_text_excerpt", "Selger er LESKE AS, org nr830961682 og org nr999888777"),
+            ("url", "https://other.no/policies/terms-of-service"),
+            ("url", "https://leske.no:8443/policies/terms-of-service"),
+            ("content_sha256", ""),
+        ]
+        for key, replacement in variants:
+            changed = copy.deepcopy(profile)
+            changed["evidence"]["website"]["value"]["pages"][0][key] = replacement
+            with self.subTest(key=key, replacement=replacement):
+                self.assertFalse(assess_website_identity(changed)["publishable"])
+        profile["evidence"]["website"]["value"]["identity_text_excerpt"] = "Org nr999888777"
+        self.assertFalse(assess_website_identity(profile)["publishable"])
+
+    def test_registered_domain_contact_address_requires_all_identity_anchors(self):
+        import copy
+
+        profile = {"organisation_number": "930290998", "name": "IZOMAX AS", "evidence": {
+            "registry_live": {"status": "available", "source_url": "https://data.brreg.no/enhetsregisteret/api/enheter/930290998",
+                              "content_sha256": "a" * 64, "retrieved_at": "2026-10-09T00:00:00Z",
+                              "value": {"organisation_number": "930290998", "name": "IZOMAX AS", "website": "izomax.com",
+                                        "business_address": {"adresse": ["Lagerveien 17"], "postnummer": "4033"}}},
+            "website": {"status": "available", "value": {"final_url": "https://izomax.com/", "title": "Izomax | Engineering", "content_sha256": "c" * 64,
+                         "pages": [{"url": "https://izomax.com/contact/", "title": "Contact", "content_sha256": "b" * 64,
+                                    "retrieved_at": "2026-10-09T00:00:01Z", "identity_text_excerpt": "Izomax HQ Lagerveien 17, 4033 Stavanger"}]}}
+        }}
+        assessment = assess_website_identity(profile)
+        self.assertTrue(assessment["publishable"])
+        self.assertEqual(assessment["identity_evidence"][0]["source_url"], "https://izomax.com/contact/")
+        international = copy.deepcopy(profile)
+        international["evidence"]["registry_live"]["value"]["website"] = "www.føniks.no"
+        international_site = international["evidence"]["website"]["value"]
+        international_site["final_url"] = "https://xn--fniks-vua.no/"
+        international_site["pages"][0]["url"] = "https://xn--fniks-vua.no/contact/"
+        self.assertTrue(assess_website_identity(international)["publishable"])
+        international_site["final_url"] = "https://foniks.no/"
+        self.assertFalse(assess_website_identity(international)["publishable"])
+        for variant in ("foreign_domain", "parent_title", "wrong_address", "missing_hash", "missing_homepage_hash", "foreign_contact", "portfolio", "conflicting_org", "wrong_live_org"):
+            changed = copy.deepcopy(profile)
+            site = changed["evidence"]["website"]["value"]
+            page = site["pages"][0]
+            if variant == "foreign_domain": site["final_url"] = "https://other.no/"
+            elif variant == "parent_title": site["title"] = "Izomax Holding | Engineering"
+            elif variant == "wrong_address": page["identity_text_excerpt"] = "Izomax HQ Lagerveien 18, 4033 Stavanger"
+            elif variant == "missing_hash": page["content_sha256"] = None
+            elif variant == "missing_homepage_hash": site["content_sha256"] = None
+            elif variant == "foreign_contact": page["url"] = "https://other.izomax.com/contact/"
+            elif variant == "portfolio": page["url"] = "https://izomax.com/portfolio/"; page["title"] = "Portfolio"
+            elif variant == "conflicting_org": page["identity_text_excerpt"] += " Org nr999888777"
+            elif variant == "wrong_live_org": changed["evidence"]["registry_live"]["value"]["organisation_number"] = "999888777"
+            with self.subTest(variant=variant):
+                self.assertFalse(assess_website_identity(changed)["publishable"])
+
+    def test_merchant_legal_contact_policy_requires_exact_name_org_and_trade_domain(self):
+        import copy
+
+        profile = {"organisation_number": "935664330", "name": "GOLF UNITY AS", "evidence": {"website": {"status": "available", "value": {
+            "final_url": "https://golfunity.no/", "title": "Golfunity", "pages": [{"url": "https://golfunity.no/policies/contact-information",
+            "content_sha256": "a" * 64, "main_text_excerpt": "Handelsnavn: Golfunity.no\nFysisk adresse: Golf Unity AS, Hadelandsveien 835\nOrganisasjonsnummer: 935 664 330"}]}}}}
+        self.assertTrue(assess_website_identity(profile)["publishable"])
+        for variant in ("wrong_domain", "wrong_name", "foreign_number", "extra_number", "group_contact"):
+            changed = copy.deepcopy(profile); page = changed["evidence"]["website"]["value"]["pages"][0]
+            if variant == "wrong_domain": page["main_text_excerpt"] = page["main_text_excerpt"].replace("Golfunity.no", "parent.no")
+            elif variant == "wrong_name": page["main_text_excerpt"] = page["main_text_excerpt"].replace("Golf Unity AS", "Golf Unity Holding AS")
+            elif variant == "foreign_number": page["main_text_excerpt"] = page["main_text_excerpt"].replace("935 664 330", "999 888 777")
+            elif variant == "extra_number": page["main_text_excerpt"] += "\nOrganisasjonsnummer: 999888777"
+            elif variant == "group_contact": page["url"] = "https://golfunity.no/contact"
+            with self.subTest(variant=variant): self.assertFalse(assess_website_identity(changed)["publishable"])
+
+    def test_contact_priority_and_address_capture_preserve_identity_within_page_budget(self):
+        from norway_company_agent.website import _identity_text, _priority_links
+
+        soup = BeautifulSoup('<a href="/about/team">Team</a><a href="/about/board">Board</a>'
+                             '<a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/contact/">Contact</a>'
+                             '<div class="address-data"><p>Izomax HQ</p><p>Lagerveien 17,<br>4033 Stavanger</p></div>', "html.parser")
+        self.assertEqual(len(_priority_links("https://izomax.com/", soup)), 4)
+        self.assertEqual(_priority_links("https://izomax.com/", soup)[1], "https://izomax.com/contact/")
+        self.assertIn("Lagerveien 17, 4033 Stavanger", _identity_text(soup))
+
+    def test_car_business_name_is_not_a_business_sports_club(self):
+        row = {"organisation_number": "936337473", "name": "BIL OG HJELP AS", "evidence": {"website": {"status": "available", "value": {"title": "BIL OG HJELP AS"}}}}
+        self.assertTrue(assess_website_identity(row)["publishable"])
+
     def test_group_contact_page_listing_subsidiary_org_number_is_not_exact_homepage_identity(self):
         profile = {
             "organisation_number": "915637353",

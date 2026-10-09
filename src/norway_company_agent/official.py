@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import date
 from typing import Any, Callable
 
 from .evidence import evidence
@@ -76,7 +77,7 @@ def normalize_financials(body: Any) -> dict[str, Any]:
     if not records:
         return {"records": []}
     normalized = []
-    for item in records[:3]:
+    for item in records:
         normalized.append({
             "record_id": item.get("id"),
             "account_type": item.get("regnskapstype"),
@@ -90,7 +91,20 @@ def normalize_financials(body: Any) -> dict[str, Any]:
             "equity": _get(item, "egenkapitalGjeld", "egenkapital", "sumEgenkapital"),
             "debt": _get(item, "egenkapitalGjeld", "gjeldOversikt", "sumGjeld"),
         })
-    return {"records": normalized}
+    return {"records": sorted(normalized, key=_financial_record_order, reverse=True)}
+
+
+def _financial_record_order(record: dict[str, Any]) -> tuple:
+    try:
+        end = date.fromisoformat(str((record.get("period") or {}).get("tilDato")))
+    except (ValueError, TypeError):
+        end = date.min
+    return end, record.get("account_type") == "SELSKAP"
+
+
+def latest_financial_record(records: list[dict[str, Any]]) -> dict[str, Any]:
+    company = [record for record in records if record.get("account_type") == "SELSKAP"]
+    return max(company or records, key=_financial_record_order) if records else {}
 
 
 def normalize_financial_history(body: Any, org: str) -> dict[str, Any]:
@@ -164,6 +178,8 @@ def normalize_entity(body: Any) -> dict[str, Any]:
         "bankrupt": body.get("konkurs"),
         "liquidating": body.get("underAvvikling"),
         "website": body.get("hjemmeside"),
+        "email": body.get("epostadresse"),
+        "telephone": body.get("telefon"),
         "industry": body.get("naeringskode1"),
         "business_address": body.get("forretningsadresse"),
         "postal_address": body.get("postadresse"),

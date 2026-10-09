@@ -76,8 +76,8 @@ def fetch(profile: dict, cache_dir: Path) -> tuple[list[dict], dict]:
         common = {
             "organisation_number": org, "platform": "company_directory", "source_url": url,
             "retrieved_at": retrieved_at, "content_sha256": digest, "exact_entity": True,
-            "identity_proof": proof, "acquisition_mode": "permitted_public_page",
-            "rights_status": "approved", "source_class": "customer_review",
+            "identity_proof": proof, "acquisition_mode": "rights_review_experiment",
+            "rights_status": "review_required", "source_class": "customer_review",
             "evidence_span": f"Google aggregate rating {rating}/5 based on {count} reviews, embedded on exact Fagfolkguiden company page.",
             "metrics": {"rating": rating, "review_count": count, "scale": 5, "google_review_url": google_url},
         }

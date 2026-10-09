@@ -1,7 +1,7 @@
 {
-  "run_id": "smoke-apex-005",
-  "started_at": "2026-10-08T16:15:39.216056Z",
-  "completed_at": "2026-10-08T16:18:52.015783Z",
+  "run_id": "untouched-holdout-036",
+  "started_at": "2026-10-09T08:25:41.775974Z",
+  "completed_at": "2026-10-09T08:29:14.788653Z",
   "expected_count": 100,
   "emitted_envelopes": 100,
   "resumed_profiles": 0,
@@ -19,15 +19,28 @@
   ],
   "registry": {
     "registry_snapshot_sha256": "5daebdf852b4a84db2ae2888f44147fc94d43230ab4cd6999bbe9c20e175af18",
-    "registry_rows_scanned": 1172821,
+    "registry_rows_scanned": 1147538,
     "requested": 100,
-    "selected": 100
+    "selected": 100,
+    "missing_from_snapshot": [],
+    "registry_parse_warnings": [
+      {
+        "organisation_number": "911730359",
+        "extra_cell_count": 7,
+        "nonempty_extra_cells": false
+      },
+      {
+        "organisation_number": "979910479",
+        "extra_cell_count": 2,
+        "nonempty_extra_cells": false
+      }
+    ]
   },
   "operations": {
-    "requests": 938,
-    "bytes": 12698204,
-    "p50_ms": 828,
-    "p95_ms": 1796
+    "requests": 1192,
+    "bytes": 40602494,
+    "p50_ms": 859,
+    "p95_ms": 2014
   },
   "validation": {
     "passed": true,
@@ -39,10 +52,41 @@
       "zero_submission_errors": true,
       "zero_silent_drops": true,
       "all_sections_present": true,
-      "all_identities_valid": true
+      "all_identities_valid": true,
+      "all_claims_supported": true
     },
     "invalid_states": [],
     "submission_errors": [],
-    "incomplete_sections": []
-  }
+    "incomplete_sections": [],
+    "invalid_identities": [],
+    "invalid_claims": []
+  },
+  "coverage": {
+    "verified_websites": 7,
+    "jobs_states": {
+      "available": 0,
+      "not_found": 0,
+      "blocked": 100,
+      "source_error": 0,
+      "ambiguous": 0,
+      "not_applicable": 0
+    },
+    "job_postings": 0,
+    "connector_errors": 0,
+    "failed_companies": 0
+  },
+  "official_score": null,
+  "experimental_connectors_enabled": false,
+  "browser": {
+    "rendered_websites": 1,
+    "source_errors": 0,
+    "bytes_scope": "captured_http_document_rendered_dom_and_secondary_http_not_all_asset_traffic",
+    "max_concurrency": 2,
+    "max_seconds_per_attempt": 20,
+    "max_requests_per_attempt": 40
+  },
+  "search_requests": 0,
+  "nav_feed": null,
+  "gross_third_party_cost_usd": 0.0,
+  "score_status": "Not measured; official checked reference collection is required for the 65/100 threshold"
 }

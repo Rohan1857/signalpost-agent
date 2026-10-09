@@ -16,6 +16,7 @@ def main() -> None:
     parser.add_argument("--output", required=True, help="Output JSONL manifest")
     parser.add_argument("--count", type=int, default=100, help="Number of companies for a local test batch")
     parser.add_argument("--seed", type=int, default=20260823)
+    parser.add_argument("--exclude", help="Prior JSONL batch whose organisation numbers must be excluded")
     args = parser.parse_args()
     if args.count < 1:
         raise SystemExit("The local test batch must contain at least one company")
@@ -24,8 +25,12 @@ def main() -> None:
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rt", encoding="utf-8") as handle:
         rows = [json.loads(line) for line in handle if line.strip()]
+    if args.exclude:
+        with open(args.exclude, encoding="utf-8") as handle:
+            excluded = {str(json.loads(line)["organisation_number"]) for line in handle if line.strip()}
+        rows = [row for row in rows if str(row["organisation_number"]) not in excluded]
     if args.count > len(rows):
-        raise SystemExit(f"Requested {args.count}; universe contains {len(rows)}")
+        raise SystemExit(f"Requested {args.count}; universe contains {len(rows)} after exclusions")
 
     chosen = random.Random(args.seed).sample(rows, args.count)
     output = Path(args.output)

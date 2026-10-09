@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from .external_footprint import publishable_observation
+from .official import latest_financial_record
 
 
 def _claim(label: str, value: Any, record: dict[str, Any], classification: str) -> dict[str, Any]:
@@ -20,12 +22,20 @@ def answer_profile(row: dict[str, Any], question: str) -> dict[str, Any]:
     """Deterministic retrieval/answer layer; it never invents a missing field."""
     q = question.casefold()
     financial_terms = ("financial", "finance", "account", "revenue", "income", "profit", "result", "debt", "asset", "regnskap")
-    all_topics = not any(term in q for term in (*financial_terms, "lead", "role", "location", "where", "social", "sentiment", "employee"))
+    activity_terms = ("news", "activity", "publication", "public post", "nyheter", "aktuelt")
+    all_topics = not any(term in q for term in (*financial_terms, *activity_terms, "lead", "role", "location", "where", "social", "sentiment", "employee"))
     evidence = row.get("evidence", {})
     facts: list[dict[str, Any]] = []
     unsupported: list[str] = []
+    uncertainties: list[dict[str, Any]] = []
 
-    registry = evidence.get("registry", {})
+    def uncertain(message: str, module: str) -> None:
+        unsupported.append(message)
+        record = evidence.get(module) or {}
+        uncertainties.append({**_claim("Unresolved information", message, record, "source_availability_or_scope"),
+                              "module": module, "status": record.get("status", "not_checked")})
+
+    registry = evidence.get("registry_live") if (evidence.get("registry_live") or {}).get("status") == "available" else evidence.get("registry", {})
     if all_topics or "employee" in q:
         for label, value in (
             ("Registered name", row.get("name")),
@@ -37,12 +47,26 @@ def answer_profile(row: dict[str, Any], question: str) -> dict[str, Any]:
             if value not in (None, ""):
                 facts.append(_claim(label, value, registry, "official_registry_fact"))
 
+    if all_topics:
+        bulk = evidence.get("registry") or {}
+        raw = bulk.get("value") or {}
+        if bulk.get("status") == "available":
+            for label, key in (
+                ("Registered business activity", "aktivitet"),
+                ("Registered company purpose", "vedtektsfestetFormaal"),
+                ("Registered contact email", "epostadresse"),
+                ("Registered contact telephone", "telefon"),
+            ):
+                if raw.get(key) not in (None, "", []):
+                    facts.append(_claim(label, raw[key], bulk, "official_registry_fact"))
+
     financial = evidence.get("financials", {})
     if all_topics or any(term in q for term in financial_terms):
         records = (financial.get("value") or {}).get("records") or []
         if records:
-            latest = records[0]
+            latest = latest_financial_record(records)
             for label, key in (
+                ("Account scope", "account_type"),
                 ("Reporting period", "period"),
                 ("Revenue", "revenue"),
                 ("Operating result", "operating_result"),
@@ -51,9 +75,9 @@ def answer_profile(row: dict[str, Any], question: str) -> dict[str, Any]:
                 ("Debt", "debt"),
             ):
                 if latest.get(key) is not None:
-                    facts.append(_claim(label, latest[key], financial, "official_annual_account"))
+                    facts.append({**_claim(label, latest[key], financial, "official_annual_account"), "reporting_period": latest.get("period"), "account_scope": latest.get("account_type")})
         else:
-            unsupported.append("No normalized annual-account record was returned; missing values are not interpreted as zero.")
+            uncertain("No normalized annual-account record was returned; missing values are not interpreted as zero.", "financials")
 
     roles = evidence.get("roles", {})
     if all_topics or any(term in q for term in ("lead", "role")):
@@ -61,7 +85,7 @@ def answer_profile(row: dict[str, Any], question: str) -> dict[str, Any]:
         for person in people[:12]:
             facts.append(_claim(person.get("role") or person.get("group") or "Registered role", person.get("name") or person.get("organisation_number"), roles, "official_role_record"))
         if not people:
-            unsupported.append("No active public role holder was returned.")
+            uncertain("No active public role holder was returned.", "roles")
 
     locations = evidence.get("locations", {})
     if all_topics or any(term in q for term in ("location", "where")):
@@ -69,23 +93,46 @@ def answer_profile(row: dict[str, Any], question: str) -> dict[str, Any]:
         for item in items[:12]:
             facts.append(_claim("Registered subunit", {"name": item.get("name"), "address": item.get("address")}, locations, "official_subunit_record"))
         if not items:
-            unsupported.append("No registered subunit was returned; this does not prove the company has no physical presence.")
+            uncertain("No registered subunit was returned; this does not prove the company has no physical presence.", "locations")
 
     website = evidence.get("website", {})
     if all_topics or "social" in q:
         value = website.get("value") or {}
-        website_publishable = (value.get("identity_assessment") or {}).get("publishable", True)
+        website_publishable = website.get("status") == "available" and (value.get("identity_assessment") or {}).get("publishable", False)
         if value.get("description") and website_publishable:
             facts.append(_claim("Website description", value["description"], website, "company_reported_claim"))
         for item in (value.get("social_links") or []) if website_publishable else []:
             facts.append(_claim(f"Declared {item['platform']} profile", item["url"], website, "company_linked_social_profile"))
         if website.get("status") == "available" and not website_publishable:
-            unsupported.append("A registry-linked website was fetched, but exact legal-entity identity was not established; its claims and social links are quarantined.")
+            uncertain("A registry-linked website was fetched, but exact legal-entity identity was not established; its claims and social links are quarantined.", "website")
         if website.get("status") != "available":
-            unsupported.append("The registry-linked company website was not available to this run.")
+            uncertain("The registry-linked company website was not available to this run.", "website")
 
     if "sentiment" in q:
-        unsupported.append("Sentiment is not scored: no labelled Norwegian news/social evaluation corpus has been run, and company-owned pages are structurally promotional.")
+        uncertain("Sentiment is not scored: no labelled Norwegian news/social evaluation corpus has been run, and company-owned pages are structurally promotional.", "sentiment")
+
+    if all_topics or any(term in q for term in activity_terms):
+        publications = [item for item in row.get("observations") or [] if item.get("signal_type") == "public_post" and
+                        item.get("source_class") == "company_site" and item.get("published_at") and
+                        str(item.get("organisation_number")) == str(row.get("organisation_number")) and publishable_observation(item)]
+        for item in publications:
+            facts.append(_claim("Company-owned publication", {"title": (item.get("metrics") or {}).get("title"), "published_at": item["published_at"]}, item, "company_reported_publication"))
+        if not publications:
+            uncertain("No dated company-owned publication was verified; this does not imply inactivity.", "website")
+
+    if all_topics:
+        jobs = evidence.get("jobs") or {}
+        if jobs.get("status") == "available":
+            for job in (jobs.get("value") or {}).get("active_postings", []):
+                facts.append(_claim("Active vacancy", job, jobs, "verified_job_posting"))
+        else:
+            uncertain(f"Hiring source status: {jobs.get('status', 'not_checked')}; unavailable hiring data does not mean zero vacancies.", "jobs")
+        for change in row.get("changes") or []:
+            label = "Newly discovered publication" if change.get("change_type") == "publication_discovered" else "Verified change: " + change["field"]
+            facts.append({"claim": label, "value": {"previous": change["old_value"], "current": change["new_value"]},
+                          "source_url": change["source_url"], "retrieved_at": change["retrieved_at"], "content_sha256": change["new_content_sha256"]})
+        for error in row.get("connector_errors") or []:
+            uncertain(f"{error['connector']} could not be checked: {error['error']}", error['connector'])
 
     return {
         "organisation_number": row.get("organisation_number"),
@@ -93,6 +140,15 @@ def answer_profile(row: dict[str, Any], question: str) -> dict[str, Any]:
         "question": question,
         "facts": facts,
         "unsupported_or_uncertain": unsupported,
+        "uncertainties": uncertainties,
+        "refresh_summary": ({
+            "state": "changes_observed" if row.get("changes") else "no_verified_changes" if row.get("evidence_history") or "refresh_baseline" in row else "baseline",
+            "message": "Verified changes are listed with their source evidence." if row.get("changes") else
+                       "No verified changes from the supplied prior snapshot; unavailable sources do not establish that the company is unchanged." if row.get("evidence_history") or "refresh_baseline" in row else
+                       "Baseline run: no prior snapshot supplied; change over time is not established.",
+            "material_change_count": len(row.get("changes") or []),
+            "baseline_retrieved_at": row.get("refresh_baseline"),
+        } if all_topics else None),
         "answer_policy": "Retrieval and deterministic filtering precede prose; only source-linked facts are returned.",
     }
 
@@ -110,7 +166,7 @@ UNSUPPORTED_SCREEN_TERMS = {
 
 def _latest_financial(row: dict[str, Any]) -> dict[str, Any]:
     records = ((row.get("evidence", {}).get("financials", {}).get("value") or {}).get("records") or [])
-    return records[0] if records else {}
+    return latest_financial_record(records)
 
 
 def _numeric_operator(phrase: str) -> str:

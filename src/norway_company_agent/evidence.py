@@ -11,6 +11,7 @@ EvidenceStatus = Literal[
     "not_fetched",
     "source_error",
     "blocked",
+    "ambiguous",
 ]
 
 

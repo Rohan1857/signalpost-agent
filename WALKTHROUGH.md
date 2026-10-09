@@ -1,119 +1,65 @@
-# Signalpost Challenge — Solution Walkthrough (`Signalpost-Apex`)
+# Signalpost audit-fix walkthrough
 
-## Summary of Accomplishments
+The previous claim that all findings were resolved was not supported by adversarial checks. The revised implementation fixes the reproduced identity, claim-validation and governance failures and integrates refresh into the actual runner.
 
-We implemented, hardened, and verified **Signalpost-Apex**, an autonomous Norwegian company research agent built for the [Signalpost challenge on Builderr.ai](https://builderr.ai/challenges/signalpost).
+Run the commands in README.md for pinned setup, regression tests, refresh replay, the evaluator batch and prototype regeneration. The tests cover formatted/conflicting employer numbers, subsidiary and reordered names, expired/inactive vacancies, parent social handles, conflicting homepage numbers, corrupted claims/snapshots/evidence, failed-source refreshes, real batch refresh and per-company worker failure.
 
-### Key Accomplishments & Hardening:
-1. **Addressed All 5 Critical Audit Findings**:
-   - **Zero Wrong-Company Matches**: Replaced loose subset matching with strict identity gating in [`jobs.py`](file:///C:/Users/messi/signalpost-agent/src/norway_company_agent/jobs.py). Rejects subsidiary and divisional modifier collisions (e.g. `eiendom`, `holding`, `invest`, `forsikring`, `pensjon`), enforces employer `orgnr` verification against `organisation_number`, and automatically rejects expired postings.
-   - **Zero Invented Vacancies**: Removed career page guessing. Only authenticated, active NAV Arbeidsplassen vacancies are classified as `job_posting`.
-   - **Preserved Source Failure States**: Network and rate limit failures (HTTP 403, 429, 500) now cleanly emit `blocked` or `source_error` instead of silently collapsing into `not_found` or `job_count: 0`.
-   - **Contract-Aligned Envelopes & Hardened Validation**: Envelopes now emit all 7 required challenge sections + synthesis alongside `claims`, `evidence`, and `run` objects compliant with [`OUTPUT_CONTRACT.md`](file:///C:/Users/messi/signalpost-agent/OUTPUT_CONTRACT.md). `validate_envelopes` enforces 8 structural and identity invariants, strictly failing on any `submission_error`.
-   - **Responsible Source Governance**: News connector marks search results as `acquisition_mode="rights_review_experiment"` and `rights_status="review_required"`. Connector error reports are preserved in `profile["connector_errors"]`.
+`out/smoke-report.json` records the fresh run's actual output count, validation and coverage. Its `official_score` is null. The normalized source snapshot and precise JSON extraction span support each published API claim; the original response hash is retained separately. This establishes local referential integrity, not independent factual precision against the hidden reference collection.
 
-2. **Full End-to-End Test Suite**:
-   - **Unit Tests**: 108 passed, 5 subtests passed (`uv run --with pytest pytest -q`).
-   - **Refresh Replay Contract**: 100% precision, 100% recall, 0 false changes, idempotent rerun passed (`out/refresh-demo.json`).
-   - **Live 100-Company Smoke Run**: 100 terminal envelopes emitted, 0 submission errors, 0 silent drops, 100% validation pass rate (`out/smoke-report.json`).
-   - **Interactive Frontend Prototype**: Generated responsive UI (`out/prototype.html`) demonstrating search, structured filters, financial tables, verified external footprints, and automated synthesis.
+The fixture refresh test contains one company and two expected changes. Separate runner regression tests exercise material change detection, preservation of earlier evidence and an unchanged rerun. A same-snapshot rerun must remain idempotent.
 
-3. **Performance Metrics (100-Company Batch)**:
-   - **Total Runtime**: 192.8 seconds across 100 live companies with 10 worker threads.
-   - **Per-Request Latency**: p50 = 828 ms, p95 = 1,796 ms (938 live network requests, 12.7 MB transferred).
-   - **Average Runtime per Company**: ~1.93 seconds per company across all official Brreg endpoints, NAV Arbeidsplassen, and verified websites.
-   - **Third-Party API Cost**: **$0.00** (uses official open Norwegian public APIs and permitted public pages).
+Strict identity verification can reduce website counts because ambiguous parent, brand, directory and guessed-domain matches are excluded. Missing-source outcomes must remain explicit. Default discovery uses public registry URLs and bounded domain probes, with independent identity verification. Brave and registered NAV access are optional integrations; personal credentials cannot be assumed for official evaluation. Neither is a prerequisite for proceeding. External recall remains a measured gap, not proof of a 65/100 score.
 
----
+The tracked `out/prototype.html` is a frozen local inspection UI. Desktop and mobile Chrome interaction was verified locally on 9 October 2026; this does not establish official UX points. No official score, perfect precision, deployment, submission or public repository publication is claimed by this walkthrough.
 
-## File Changes Summary
+## Final local verification before requested pause (9 October 2026)
 
-| Component | File | Description |
-| :--- | :--- | :--- |
-| **NAV Jobs Engine** | [`src/norway_company_agent/jobs.py`](file:///C:/Users/messi/signalpost-agent/src/norway_company_agent/jobs.py) | Strict employer `orgnr` check, subsidiary token conflict rejection, expired vacancy filter, failure state preservation, and removal of unverified career page jobs. |
-| **Batch Contract** | [`src/norway_company_agent/batch.py`](file:///C:/Users/messi/signalpost-agent/src/norway_company_agent/batch.py) | Contract-compliant `terminal_envelope` with 7 required sections, claims, evidence, and synthesis; hardened `validate_envelopes` checking all 8 invariants. |
-| **Batch Runner** | [`scripts/run_competition_batch.py`](file:///C:/Users/messi/signalpost-agent/scripts/run_competition_batch.py) | Wire jobs, website evidence fallback, and connector error preservation; emit validated terminal envelopes. |
-| **News Connector** | [`scripts/run_google_news_rss_connector.py`](file:///C:/Users/messi/signalpost-agent/scripts/run_google_news_rss_connector.py) | Set `rights_review_experiment` and `review_required` to avoid unverified search-title publication. |
-| **Unit & Contract Tests** | [`tests/test_jobs.py`](file:///C:/Users/messi/signalpost-agent/tests/test_jobs.py), [`tests/test_poc.py`](file:///C:/Users/messi/signalpost-agent/tests/test_poc.py) | Added tests for subsidiary rejection, NAV error preservation, contract envelope fields, and invalid envelope rejection. |
-| **Prototype UI** | [`out/prototype.html`](file:///C:/Users/messi/signalpost-agent/out/prototype.html) | Interactive desktop and mobile UX for inspecting company profiles, evidence, and synthesis. |
+Fresh original smoke run `current-financial-smoke-020` emitted 100/100 valid envelopes, zero drops or worker failures, seven verified websites, five declared social links, ten registry workforce snapshots and two dated publications. NAV search was blocked for all 100; no vacancies were asserted. Runtime: 243.2 seconds; requests: 1,033; request p95: 1,969 ms; third-party API cost and Brave requests: zero. Every selected company financial account ends on 31 December 2025.
 
----
+A material financial defect was fixed: normalization previously truncated the API's oldest-first array before sorting and presentation used its first record. All returned account records are now retained and sorted; synthesis, screening and prototype answers select the latest company account, retain reporting periods, and distinguish consolidated accounts. Live Brreg checks confirmed 2025 company accounts for FRAMAR, BOWLINE ENGINEERING and VILLA SOLHAUG; FRAMAR's newer record had been omitted by the old three-record limit.
 
-## Verification Evidence
+Contact pages now follow legal terms and precede privacy/team pages within the same four-page limit. Secondary pages have the existing 2 MB homepage cap, and semantic address blocks are retained. A live registered-domain/name/address proof recovered IZOMAX, its 8 October 2026 publication and declared LinkedIn link. A separate merchant legal-contact policy proof recovered GOLF UNITY, its 7 February 2026 publication and two declared handles. Both targeted live envelopes passed validation. These are targeted positive cases, not a new population recall estimate.
 
-### 1. Automated Test Suite
-```bash
-uv run --with pytest pytest -q
-```
-**Output:**
-```
-108 passed, 5 subtests passed in 3.90s
-```
+The independent seed-20261010 100-company batch excluded all 200 prior smoke/holdout IDs: 100 valid envelopes, eight websites, five declared social links, nineteen registry workforce snapshots and one dated post, zero jobs, 242.3 seconds, 1,022 requests, $0 API cost. That run predates the financial and merchant-policy fixes and is retained as a diagnostic, not final submission output.
 
-### 2. Deterministic Refresh Replay
-```bash
-uv run python scripts/run_refresh_replay.py --manifest tests/fixtures/refresh-snapshots.json --output out/refresh-demo.json
-```
-**Output:**
-```json
-{
-  "corpus": "evaluator-owned deterministic old/new source snapshot fixture",
-  "profiles": 1,
-  "modules": ["financials", "registry_live"],
-  "old_requests": 2,
-  "new_requests": 2,
-  "expected_changes": 2,
-  "observed_changes": 2,
-  "true_positive": 2,
-  "false_positive": 0,
-  "false_negative": 0,
-  "precision": 1.0,
-  "recall": 1.0,
-  "evidence_complete": true,
-  "idempotent_rerun": true,
-  "qualification_passed": true
-}
-```
+Tracked smoke artifacts were backed up in the live run directory, then regenerated offline from run 020's retained snapshots using final envelope/synthesis code and identity policy v8. All website classifications were unchanged and validation passed. `out/smoke-report.json` records this offline regeneration separately; network metrics describe the original source fetch. The prototype was rebuilt from these tracked profiles. Regression: 180 tests and 33 subtests passed; deterministic refresh: both expected changes, no false changes, idempotent. Chrome desktop/mobile checks passed for dated activity and company-account year/scope. No official score, public submission or independently measured recall is claimed. See `REVIEW_HANDOFF.md` for complete context and artifact paths.
 
-### 3. Live 100-Company Smoke Run
-```bash
-uv run python scripts/run_competition_batch.py \
-  --organisations smoke-companies.jsonl \
-  --bulk brreg-enheter.csv \
-  --profiles-output out/smoke-profiles.jsonl \
-  --output out/smoke-envelopes.jsonl \
-  --report out/smoke-report.json \
-  --run-id smoke-apex-005 \
-  --expected-count 100 \
-  --workers 10
-```
-**Validation Output:**
-```json
-{
-  "run_id": "smoke-apex-005",
-  "expected_count": 100,
-  "emitted_envelopes": 100,
-  "validation": {
-    "passed": true,
-    "checks": {
-      "exact_expected_count": true,
-      "unique_organisation_numbers": true,
-      "all_entity_states_terminal": true,
-      "all_module_states_terminal": true,
-      "zero_submission_errors": true,
-      "zero_silent_drops": true,
-      "all_sections_present": true,
-      "all_identities_valid": true
-    },
-    "invalid_states": [],
-    "submission_errors": [],
-    "incomplete_sections": []
-  }
-}
-```
+## Prior holdout verification
 
-### 4. Interactive Frontend Prototype
-```bash
-uv run python scripts/build_prototype.py --input out/smoke-profiles.jsonl --output out/prototype.html
-```
-Generated `out/prototype.html` containing full multi-profile desktop/mobile UI with synthesis, financial comparisons, and evidence trails.
+Full frozen-universe holdout refresh `frozen-contact-activity-016` emitted 100/100 valid envelopes with zero drops or worker failures. Websites increased from six to eight: LESKE AS via exact legal seller proof and C OPTIKK EIDSVOLL AS via its homepage name, live registered street/postcode and phone. All six previously accepted sites remained accepted. Observations: twelve registry workforce snapshots, four source-attributed declared social links and one dated company-owned publication. Villa Solhaug's 26 October 2023 publication was correctly labeled `publication_discovered`, not newly published. NAV outcomes: ninety blocked, ten ambiguous, zero vacancies asserted. Runtime: 280.1 seconds; requests: 960; request p95: 2,343 ms; third-party API cost: zero. Artifacts are in the temporary `signalpost-contact-activity-holdout-iixwh39_` directory, the then-tracked smoke was `keyless-social-013`, subsequently superseded by run 020 above.
+
+After this live run, the contact rule was tightened to require an exact title fragment and reject prefix variants with Holding/Eiendom modifiers. A replay of all 100 retained snapshots under identity policy v6 preserved all eight accepted websites with zero classification changes. This replay made no source requests and is distinct from the live v5 run. Current suite: 174 tests and 19 subtests passed. The deterministic refresh fixture still produced both expected changes, no false changes and an idempotent replay. These are operational and audited example results; no independently labeled population recall or official 65-point score is established.
+
+Final targeted runner `dated-positive-015` emitted two valid envelopes and two dated company-owned posts, with both empty NAV name searches correctly ambiguous and no zero-vacancy claim. Runtime: 34.8 seconds; requests: 34; request p95: 2,375 ms; third-party API cost: zero. The source dates were 1 March 2025 for Minkrypto's article and 7 October 2026 for Novooi's publication. Outputs are in the temporary `signalpost-dated-batch-0hhoilkj` directory. This is a two-company positive-control test, not population recall or official qualification.
+
+The dated-activity strategy reached Minkrypto's blog and Novooi's inspiration archive and independently fetched article details with explicit publication dates. Initial checks failed because the blog exceeded a 1 MB cap and Novooi's article permalinks were outside the archive path. The bounded cap is now 2 MB, explicit archive article cards are followed, and Norwegian URL paths are percent-encoded. Future, missing and modification-only dates are rejected; a malformed candidate does not hide other valid posts. The targeted `dated-positive-014` two-company runner produced two dated posts and valid envelopes, but exposed a legacy NAV branch that incorrectly asserted zero vacancies after an empty successful name search. That branch is corrected to ambiguous; NAV positives now retain real query-response provenance. Current regression suite: 171 tests and 12 subtests passed. Full 100-company dated-activity recall remains unmeasured; the tracked smoke artifacts remain the preceding `keyless-social-013` run.
+
+Fresh full-batch run `keyless-social-013` supersedes the earlier tracked smoke artifacts: 100/100 valid envelopes, zero drops, zero worker failures, seven verified websites, five page-attributed declared social links across two companies (previously two links), ten registry workforce observations and zero job postings. NAV search remained blocked for all 100 companies. Runtime: 245.2 seconds; requests: 1,025; request p95: 2,061 ms; Brave requests and third-party API cost: zero. The prototype was rebuilt from these 100 profiles. This increases individual-link coverage, not the number of companies with social evidence. Prior tracked artifacts are backed up in the run's temporary directory. The official score remains unmeasured.
+
+The social-attribution strategy retains page-local DOM and organisation `sameAs` captures and uses their page URL/hash instead of assigning every observation the homepage hash. A targeted live audit of the four previously observed social companies produced six captured links versus four in the earlier snapshots: Novooi supplied three additional declared links, while Dimensjon's homepage returned HTTP 403 and therefore emitted no current social observation. RB Proff Partner and Labhuset retained their links. This is a selected-positive source check, not population recall; blocked access is not a real-world deletion. The claims explicitly record `company_site_declared_link` and `destination_verified: false`. Regression suite: 167 tests and 12 subtests passed; `git diff --check` passed.
+
+The subsequent legal-seller strategy replays the original smoke and frozen-universe batch from their retained snapshots: verified website counts change from 7/6 to 7/7, with no previously accepted website removed. The one added entity is LESKE AS (830961682), explicitly identified as seller in same-host sales terms with the matching organisation number. A fresh bounded crawl independently confirmed that declaration and retained the legal-page response hash. These are strategy-level checks, not a new whole-batch crawl, a blind precision audit or an official score. The crawler prioritizes legal pages within its existing four-page budget and avoids matching `kontaktlinser` as a contact page. Current regression suite after the Norwegian compound-keyword update: 165 tests and 12 subtests passed; git diff --check passed. A live C Optikk Eidsvoll crawl reached its sales terms, which identify the different C Optikk AS parent organisation number; publication correctly remained ambiguous.
+
+The credential-free `keyless-coverage-009` live run emitted 100/100 valid envelopes with zero drops, worker failures, Brave requests or third-party API cost. Seven company websites passed the identity gate (previous saved run: six). All 100 synthesis sections include source-linked registered activity. NAV remained blocked for all 100 companies and no job postings were published. Runtime was approximately 247.6 seconds; request p95 was 2,000 ms. These measurements are local coverage and operational results, not a competition score.
+
+Regression suite including the frozen-universe selector change: 162 tests and 5 subtests passed. The deterministic refresh fixture was idempotent with no false changes. Both prototype JavaScript blocks passed `node --check`; interactive desktop/mobile verification remains outstanding. No supplied Brave secret appears in tracked files. See IMPLEMENTATION_PLAN.md for verified evaluator rules and remaining qualification work.
+
+The separate registry-derived 100-company diagnostic batch had zero overlap with the smoke set and eight verified websites. Its latest run emitted 100 valid envelopes, but the experimental NAV public-token request timed out: all 100 job modules reported source errors and no vacancies were published. Frozen-universe verification subsequently found one ineligible company in this batch, so it is not a clean competition-universe holdout.
+
+Workforce observations now preserve the supporting registry response's original hash and retrieval date and reject mismatched entity IDs. Existing smoke and diagnostic artifacts were rebuilt from retained snapshots after that correction, without refetching sources; their reports mark this postprocessing explicitly. Neither those rebuilds nor operational validation establish official recall or a 65-point score.
+
+The fresh `frozen-universe-012` run used 100 companies sampled directly from the verified public universe, seed 20261009, with zero organisation overlap against the original smoke batch. Selected-ID hash: `cd11d2dcbedfc1abc29e41d7114f15ee29f78c272e6ee4d4da53122f76c695ec`. It emitted 100/100 valid envelopes with zero silent drops or worker failures, six verified websites, zero jobs and 100 blocked NAV search outcomes. Runtime: 286.1 seconds; requests: 971; request p95: 2,656 ms; Brave requests and third-party API cost: zero. The source universe listed five websites; this does not establish the number of websites actually discoverable online. The run has no independently labelled recall denominator or official score. Host separation has not been audited. Diagnostic artifacts are in the local temporary directory `signalpost-frozen-holdout-npiqjfca`, outside the submitted repository; the original tracked smoke artifacts remain available.
+
+## Prototype interaction verification (9 October 2026)
+
+Corrected stale LinkedIn counts, hidden approved company-site publications and NAV observations, empty searches retaining a previous company, missing publication dates in evidence inspection, and missing reaction counts rendered as zero. Financial answers now include reporting periods. Prototype publication filtering excludes foreign-company and unapproved observations.
+
+Isolated headless Chrome checks passed at 1440×1000 and 390×844: company selection, dated publication answers, evidence hashes and source links, explicit hiring unknowns, pins, saved views, JSON export, empty-search clearing, corrupt workspace recovery, no horizontal overflow and no JavaScript errors. The live holdout publication retained its full timestamp (`2023-10-26T15:01:03`); it is not labeled current activity. Browser artifacts are in `C:\Users\messi\AppData\Local\Temp\signalpost-ui-audit-36hvor1l`. The tracked prototype still uses smoke run `keyless-social-013`; browser checks used the later 100-company contact/activity holdout. Regression: 175 tests and 19 subtests passed. No Brave requests, paid API usage or official submission were made for this verification.
+
+## Pinned comparison verification — 9 October 2026
+
+Latest source verification: run `footer-holdout-025` re-fetched the same 100-company frozen-universe holdout after XML-declared HTML and numbered-footer extraction fixes. All envelopes passed validation, with zero drops/errors. Compared with the earlier run, accepted websites increased from 8 to 10 with no previous sites lost, site-declared social links from 5 to 7, and dated publications from 1 to 2. The additions use exact merchant-policy or registered-contact proof; no identity threshold was relaxed. Zero verified vacancies remain. Runtime 231.6 seconds, 1,008 requests, $0 third-party API cost. Regression suite: 182 tests and 33 subtests passed. See the handoff for artifacts and attribution limits; official recall and qualification remain unmeasured.
+
+The prototype now compares up to three pinned companies with legal identity, registered industry, municipality, employees, financial period and account scope, financial values, verified websites, publications, hiring and changes/baseline. Source links remain attached. Missing vacancies are explicitly unknown; blocked financial modules suppress retained values in comparison. Four pins show three columns; removing one brings the next pin into view. Pins survive reload.
+
+Isolated Chrome checks passed at 1440×1000 and 390×844, with no JavaScript errors or document overflow. The mobile table scrolls within its own region. Screenshots and browser report: `C:\Users\messi\AppData\Local\Temp\signalpost-comparison-audit-d8mj7af4`. Regression: 180 tests and 33 subtests passed. These checks establish local behavior, not official UX points or qualification. No source crawl, paid request, publication or submission occurred during these checks.
