@@ -1,54 +1,50 @@
-# Signalpost Agent — version 1
+# Version 1
 
-Researches evaluator-supplied Norwegian organisation numbers, verifies exact-company identity, retains claim-level sources and dates, and produces terminal envelopes with synthesis and explicit unknowns. The frozen inspection UI supports desktop/mobile filtering, source inspection and comparison of up to three companies.
+Submitted to Builderr on 9 October 2026.
 
-## Installation
+- Repository: https://github.com/Rohan1857/signalpost-agent
+- Frozen commit: `5ae132ae2acad510a5d42f195c60ec6657d98dae`
+- Contact: Rohan, rohan.185712@gmail.com
 
-Requires Python 3.12+, uv and network access. Install only from the pinned checkout:
+Later documentation edits on `main` don't change the submitted version. Check out the commit above to reproduce it.
+
+## Setup and command
+
+Requires Python 3.12+, uv and network access:
 
 ```sh
 uv sync --locked
 uv run playwright install chromium
 ```
 
-On a minimal Linux image, substitute `uv run playwright install --with-deps chromium` for the second command; it installs browser system dependencies and may require system package permissions.
+On minimal Linux, use `uv run playwright install --with-deps chromium` for the second step.
 
-## One evaluator command
-
-Builderr supplies `batch.jsonl` and `registry.csv`. The registry parser accepts CSV or gzip content, and the input company count is inferred. No preselected company list is used for evaluation.
+Builderr supplies `batch.jsonl` and `registry.csv`:
 
 ```sh
 uv run python scripts/run_competition_batch.py --organisations batch.jsonl --bulk registry.csv --profiles-output out/profiles.jsonl --output out/envelopes.jsonl --report out/run-report.json --run-id official-v1 --workers 10
 ```
 
-For refresh, append `--previous-profiles previous-profiles.jsonl` and use new output paths. Source snapshots and earlier evidence are retained; repeated identical snapshots are idempotent. The runner has no official-cutoff CLI flag; source retrieval/publication dates are retained for evaluator cutoff checks.
+The runner reads the supplied batch rather than a fixed company list. For refresh, add `--previous-profiles previous-profiles.jsonl` and choose new output paths. Source dates are retained, but the runner has no cutoff CLI flag.
 
-## Smoke evidence
+## Checks
 
-- Input: `smoke-companies.jsonl`, 100 previously untested companies selected from the frozen eligible universe, seed 20261012, excluding 409 prior research IDs.
-- Report: `out/smoke-report.json`, run `untouched-holdout-036`, 9 October 2026.
-- Results: `out/smoke-envelopes.jsonl` and `out/smoke-profiles.jsonl`; 100/100 terminal envelopes, all nine validation checks passed, no silent drops or submission errors.
-- Coverage: seven verified websites; zero verified job postings, with all legacy NAV requests explicitly blocked. Missing facts are not replaced with zero.
-- Runtime: 213 seconds with ten workers; 1,192 requests, p95 2,014 ms. This is local operational evidence, not compliance with an undisclosed official resource allowance.
-- Browser: one verified rendered website; at most two simultaneous isolated browser contexts.
-- Deterministic refresh evidence: `out/refresh-demo.json`.
-- Prototype: `out/prototype.html`, generated from the same smoke profiles. It is an inspection sample, not a background research service.
-- Official score and 65/100 qualification: not measured.
+The committed [smoke report](out/smoke-report.json) covers 100 companies selected from the eligible universe with seed 20261012, excluding 409 previously researched IDs. All 100 envelopes passed validation with no dropped inputs or submission errors. It found seven verified websites and no verified jobs; all NAV searches were blocked. The run took 213 seconds with ten workers.
 
-## Models, APIs, licences and cost
+A clean clone installed the locked dependencies, passed 203 tests and 33 subtests, and completed another 100-company run in 211.8 seconds. That run also returned 100 valid envelopes. The [refresh fixture](out/refresh-demo.json) recovered both expected changes without false changes or duplicate events.
 
-No external model or entrant-owned API credential is required. The evaluator command makes zero Brave requests, leaves the experimental NAV feed disabled, and leaves Google News/Fagfolkguiden experiments disabled. No cached external profiles feed the official run; committed smoke results are demonstration artifacts only. The evaluator-provided frozen registry is the declared identity cache.
+These are local checks. Official scoring and qualification remain pending. The saved [prototype](out/prototype.html) lets reviewers browse and compare the smoke profiles.
 
-Default sources are public Brreg registry, roles, accounts, group and subunit endpoints; guarded company-owned websites; and NAV's public vacancy search endpoint, whose access errors remain explicit. Website acquisition checks public addresses, robots and redirects. Company content is attributed to its source, social links are company-site declarations rather than verified destination content, and financial claims retain company/consolidated scope and reporting period. See README for source restrictions and experimental connectors.
+## APIs, cost and licences
 
-Expected default third-party API charges per official batch: **$0**. Compute, browser installation, bandwidth and hosting are excluded; no claim is made about their cost. Optional paid search is not part of this submission command.
+No external model or personal credential is required. The command uses public Brreg APIs, company websites and NAV vacancy search. Brave, the experimental NAV feed and news/review experiments stay disabled. Committed profiles are sample outputs, not a discovery cache for evaluation.
 
-Direct runtime dependencies and declared installed-package licences:
+Expected third-party API charges: $0 per default batch. Compute, hosting and bandwidth are separate; the official resource allowance hasn't been confirmed.
 
-| Dependency | Licence |
+| Runtime dependency | Licence |
 | --- | --- |
 | beautifulsoup4 | MIT |
-| extruct | BSD (package metadata) |
+| extruct | BSD, as declared in package metadata |
 | lxml | BSD-3-Clause |
 | pydantic | MIT |
 | pypdf | BSD-3-Clause |
@@ -56,13 +52,4 @@ Direct runtime dependencies and declared installed-package licences:
 | tldextract | BSD-3-Clause |
 | trafilatura | Apache-2.0 |
 
-Exact dependency versions are in `uv.lock`; transitive dependencies retain their own licences. This repository has no standalone project licence file; this list describes dependencies and does not grant a new licence over the supplied starter or third-party source content.
-
-## Verification
-
-```sh
-uv run --with pytest==9.1.1 pytest -q
-uv run python scripts/run_refresh_replay.py --manifest tests/fixtures/refresh-snapshots.json --output out/refresh-demo.json
-```
-
-Contact, public repository URL and exact frozen commit are supplied in the submission email.
+`uv.lock` pins dependency versions. Transitive dependencies keep their own licences. The repository has no standalone project licence file; this table doesn't grant rights over the supplied starter or third-party content.
